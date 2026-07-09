@@ -1,0 +1,45 @@
+services:
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      APP_ENABLE_SCHEDULER: ${APP_ENABLE_SCHEDULER:-false}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/ci_ai_codereview}
+      MONGODB_DB: ${MONGODB_DB:-ci_ai_codereview}
+      MONGO_MOCK: ${MONGO_MOCK:-false}
+      LLM_URL: ${LLM_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_CONCURRENCY: ${LLM_CONCURRENCY:-4}
+      LLM_MAX_TOOL_ROUNDS: ${LLM_MAX_TOOL_ROUNDS:-30}
+      LLM_JSON_RETRY_TIMES: ${LLM_JSON_RETRY_TIMES:-2}
+      LLM_MOCK_ENABLED: ${LLM_MOCK_ENABLED:-true}
+      CODE_REPOSITORY_ROOT: ${CODE_REPOSITORY_ROOT:-}
+      MOCK_REVIEW_VERSION: ${MOCK_REVIEW_VERSION:-/app}
+      MOCK_TASK_TYPE: ${MOCK_TASK_TYPE:-2}
+    ports:
+      - "8000:8000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mongodb_data:
