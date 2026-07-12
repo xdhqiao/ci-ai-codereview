@@ -137,6 +137,8 @@ class CodeFileModel(Document):
     copy_from_version = StringField(required=True)
     task_type = IntField(required=False)
     file_name = StringField(required=True)
+    background = StringField(required=False, default="")
+    background_source = StringField(required=False, default="")
     code_blocks = ListField(EmbeddedDocumentField(CodeBlock), default=list)
     code_line_num = IntField(required=False, default=0)
     add_code_line_num = IntField(required=False, default=0)

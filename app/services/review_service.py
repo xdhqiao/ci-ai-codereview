@@ -8,12 +8,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.core.exceptions import NotFoundError
 from app.models.code_file import CodeBlock, CodeFileModel, Issue, ModelRoundTrace, ToolCallTrace
 from app.models.task import TaskModel
+from app.services.background import FileBackgroundProvider, FileReviewBackground, MockFileBackgroundProvider
 from app.services.diff_service import (
     TASK_TYPE_FULL_SCAN,
     TASK_TYPE_INCREMENTAL,
@@ -36,13 +38,14 @@ from app.services.prompts import (
 from app.services.review_tools import ReviewToolRunner
 from app.services.related_files import RelatedFile, RelatedFileResolver
 from app.services.rules import review_rules_for
+from app.services.semantic_index import SemanticIndex
 from app.services.static_analysis import SarifFindingLoader, StaticFinding
 
 
 SCORE_FIELDS = ["logic_score", "performance_score", "security_score", "readable_score", "code_style_score"]
 TASK_STATE_COMPLETED = 2
 TASK_STATE_PARTIAL = 3
-REVIEW_PIPELINE_VERSION = "2026-07-12-ocr-accuracy-v4-sarif-evidence"
+REVIEW_PIPELINE_VERSION = "2026-07-12-ocr-accuracy-v5-background-semantic-index"
 
 
 def utc_now() -> datetime:
@@ -89,13 +92,21 @@ class MainResult:
 
 
 class ReviewTaskService:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        background_provider: FileBackgroundProvider | None = None,
+    ) -> None:
         self.settings = settings or get_settings()
         self.diff_service = CodeDiffService(self.settings)
         self.llm_client = LLMClient(self.settings)
         self.review_context = ReviewCollection(targets=[], diff_map={}, changed_files=[])
         self.evidence_locator = CodeEvidenceLocator(self.settings.review_line_evidence_min_similarity)
         self.related_file_resolver = RelatedFileResolver()
+        self.background_provider = background_provider or MockFileBackgroundProvider()
+        self.file_backgrounds: dict[str, FileReviewBackground] = {}
+        self._background_lock = Lock()
+        self.semantic_index: SemanticIndex | None = None
         self.static_findings_by_file: dict[str, list[StaticFinding]] = {}
         self.task_model_rounds: list[ModelRoundTrace] = []
         self.rule_settings = self.settings
@@ -122,6 +133,7 @@ class ReviewTaskService:
     def review_task(self, task: TaskModel) -> TaskModel:
         started_at = time.monotonic()
         self.task_model_rounds = []
+        self.file_backgrounds = {}
         task.state = 1
         task.update_time = utc_now()
         task.save()
@@ -130,6 +142,11 @@ class ReviewTaskService:
             review_context, review_root = self._collect_targets(task)
             self.review_context = review_context
             self.rule_settings = self._resolve_rule_settings(review_root)
+            self.semantic_index = (
+                SemanticIndex(review_root, self.settings)
+                if self.settings.review_semantic_index_enabled
+                else None
+            )
             self.static_findings_by_file = SarifFindingLoader(self.settings).load(review_root)
             targets = review_context.targets
             target_names = {target.file_name for target in targets}
@@ -252,7 +269,7 @@ class ReviewTaskService:
 
         for target in targets:
             source_hash = self._source_hash(target)
-            review_fingerprint = self._target_hash(target, source_hash)
+            review_fingerprint = self._target_hash(task, target, source_hash)
             estimated_tokens = self._estimate_target_tokens(target)
             existing = self._find_reusable_code_file(task, target, source_hash, review_fingerprint)
             if existing:
@@ -337,6 +354,7 @@ class ReviewTaskService:
         token_budget: int,
         consumed_tokens: int,
     ) -> CodeFileModel:
+        background = self._file_background(task, target)
         CodeFileModel.objects(task_id=str(task.id), file_name=target.file_name).delete()
         code_file = CodeFileModel(
             task_id=str(task.id),
@@ -345,6 +363,8 @@ class ReviewTaskService:
             copy_from_version=task.copy_from_version,
             task_type=task.task_type,
             file_name=target.file_name,
+            background=background.content,
+            background_source=background.source,
             code_blocks=[],
             code_line_num=target.code_line_num,
             add_code_line_num=target.add_code_line_num,
@@ -371,40 +391,41 @@ class ReviewTaskService:
         if task.task_type != TASK_TYPE_FULL_SCAN or not self.settings.full_scan_batch_dedup_enabled:
             return
 
-        seen: dict[tuple[str, int, str, str], tuple[str, int, int]] = {}
+        seen: dict[tuple[str, int, str, str], tuple[CodeFileModel, CodeBlock, Issue]] = {}
+        group_ids: dict[tuple[str, int, str, str], str] = {}
         duplicate_count = 0
         for code_file in code_files:
             if (code_file.extra or {}).get("status") != "reviewed":
                 continue
-            for block_index, block in enumerate(code_file.code_blocks):
-                changed = False
+            for block in code_file.code_blocks:
                 for issue_index, issue in enumerate(block.issues):
                     if issue.issue_show is False:
                         continue
                     key = self._batch_issue_key(issue)
                     if key not in seen:
-                        seen[key] = (code_file.file_name, block_index + 1, issue.issue_id or issue_index + 1)
+                        seen[key] = (code_file, block, issue)
                         continue
                     duplicate_count += 1
-                    first_file_name, first_block_id, first_issue_id = seen[key]
-                    canonical_ref = f"{first_file_name}#block{first_block_id}#issue{first_issue_id}"
-                    issue.issue_show = False
-                    issue.filter_status = "filtered"
-                    issue.filter_reason = f"batch_dedup: duplicate of {canonical_ref}"
-                    issue.duplicate_group_id = f"batch-{batch_index}-exact-{duplicate_count}"
+                    canonical_file, canonical_block, canonical_issue = seen[key]
+                    canonical_ref = (
+                        f"{canonical_file.file_name}#block{canonical_block.block_id}"
+                        f"#issue{canonical_issue.issue_id or issue_index + 1}"
+                    )
+                    group_id = group_ids.setdefault(
+                        key,
+                        f"batch-{batch_index}-exact-{len(group_ids) + 1}",
+                    )
+                    canonical_issue.duplicate_group_id = group_id
+                    canonical_issue.duplicate_of = ""
+                    issue.duplicate_group_id = group_id
                     issue.duplicate_of = canonical_ref
-                    issue.re_review_status = 1
-                    issue.re_review_description = issue.filter_reason
-                    issue.comment_line_number = 0
-                    changed = True
-                if changed:
-                    self._reindex_issues(block.issues)
-                    block.comment_line_number = self._visible_issue_count(block.issues)
-            code_file.comment_line_number = sum(self._visible_issue_count(block.issues) for block in code_file.code_blocks)
+
+        for code_file in code_files:
             code_file.extra = {
                 **(code_file.extra or {}),
                 "batch_index": batch_index,
                 "batch_dedup_duplicate_count": duplicate_count,
+                "batch_dedup_mode": "group_only",
             }
             code_file.save()
 
@@ -495,26 +516,17 @@ class ReviewTaskService:
             )
             group_id = f"batch-{batch_index}-semantic-{group_index}"
             canonical_issue.duplicate_group_id = group_id
+            canonical_issue.duplicate_of = ""
             changed_files.add(canonical_file.file_name)
             for code_file, block, issue in member_refs[1:]:
-                issue.issue_show = False
-                issue.filter_status = "filtered"
-                issue.filter_reason = f"semantic_batch_dedup: duplicate of {canonical_ref}"
                 issue.duplicate_group_id = group_id
                 issue.duplicate_of = canonical_ref
-                issue.re_review_status = 1
-                issue.re_review_description = issue.filter_reason
-                issue.comment_line_number = 0
-                self._reindex_issues(block.issues)
                 changed_files.add(code_file.file_name)
                 duplicate_count += 1
 
         for code_file in code_files:
             if code_file.file_name not in changed_files:
                 continue
-            code_file.comment_line_number = sum(
-                self._visible_issue_count(block.issues) for block in code_file.code_blocks
-            )
             code_file.save()
         return duplicate_count
 
@@ -573,11 +585,20 @@ class ReviewTaskService:
         )
         return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
-    def _target_hash(self, target: ReviewTarget, source_hash: str | None = None) -> str:
+    def _target_hash(
+        self,
+        task: TaskModel,
+        target: ReviewTarget,
+        source_hash: str | None = None,
+        background: FileReviewBackground | None = None,
+    ) -> str:
         source_hash = source_hash or self._source_hash(target)
+        background = background or self._file_background(task, target)
         fingerprint_payload = {
             "pipeline_version": REVIEW_PIPELINE_VERSION,
             "source_hash": source_hash,
+            "background": background.content,
+            "background_source": background.source,
             "model": self.settings.llm_model,
             "mock": self.llm_client.is_mock,
             "rules": review_rules_for(target.file_name, target.language, self.rule_settings),
@@ -591,6 +612,7 @@ class ReviewTaskService:
             "static_findings": [
                 finding.fingerprint for finding in self.static_findings_by_file.get(target.file_name, [])
             ],
+            "semantic_index_enabled": self.settings.review_semantic_index_enabled,
         }
         return hashlib.sha256(
             json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -598,7 +620,8 @@ class ReviewTaskService:
 
     def _review_file(self, task: TaskModel, target: ReviewTarget, review_root: Path) -> CodeFileModel:
         source_hash = self._source_hash(target)
-        review_fingerprint = self._target_hash(target, source_hash)
+        background = self._file_background(task, target)
+        review_fingerprint = self._target_hash(task, target, source_hash, background)
         estimated_tokens = self._estimate_target_tokens(target)
         CodeFileModel.objects(task_id=str(task.id), file_name=target.file_name).delete()
         related_files = self._related_files(target)
@@ -615,6 +638,7 @@ class ReviewTaskService:
                 target.full_code,
                 related_files_context,
                 static_analysis_context,
+                background.content,
             )
             main_failure_message = ""
             try:
@@ -625,6 +649,7 @@ class ReviewTaskService:
                     review_root,
                     related_files_context,
                     static_analysis_context,
+                    background.content,
                 )
                 issues = main_result.issues
                 main_failure_message = main_result.failure_message
@@ -636,6 +661,7 @@ class ReviewTaskService:
                 target,
                 block_lines,
                 issues,
+                background.content,
             )
             corroborated_count = self._corroborate_static_findings(relocation_issues, static_findings)
             static_rounds = []
@@ -652,6 +678,7 @@ class ReviewTaskService:
                 target,
                 block_lines,
                 relocation_issues,
+                background.content,
             )
             self._reindex_issues(filtered_issues)
             visible_issue_count = self._visible_issue_count(filtered_issues)
@@ -717,6 +744,8 @@ class ReviewTaskService:
             copy_from_version=task.copy_from_version,
             task_type=task.task_type,
             file_name=target.file_name,
+            background=background.content,
+            background_source=background.source,
             code_blocks=code_blocks,
             code_line_num=target.code_line_num,
             add_code_line_num=target.add_code_line_num,
@@ -730,6 +759,7 @@ class ReviewTaskService:
                 "estimated_tokens": estimated_tokens,
                 "language": target.language,
                 "change_type": target.change_type,
+                "background_source": background.source,
                 "old_file_name": target.old_file_name,
                 "related_files": [item.as_dict() for item in related_files],
                 "static_finding_count": sum(len(block.static_findings) for block in code_blocks),
@@ -742,6 +772,23 @@ class ReviewTaskService:
         code_file.save()
         return code_file
 
+    def _file_background(self, task: TaskModel, target: ReviewTarget) -> FileReviewBackground:
+        cache_key = f"{task.project_id}\0{task.review_version}\0{target.file_name}"
+        cached = self.file_backgrounds.get(cache_key)
+        if cached is not None:
+            return cached
+        with self._background_lock:
+            cached = self.file_backgrounds.get(cache_key)
+            if cached is not None:
+                return cached
+            background = self.background_provider.get_background(
+                project_id=task.project_id,
+                review_version=task.review_version,
+                file_name=target.file_name,
+            )
+            self.file_backgrounds[cache_key] = background
+            return background
+
     def _run_plan_task(
         self,
         file_name: str,
@@ -750,6 +797,7 @@ class ReviewTaskService:
         full_code: str,
         related_files_context: str = "",
         static_analysis_context: str = "",
+        background: str = "",
     ) -> PlanResult:
         messages = build_plan_messages(
             file_name=file_name,
@@ -759,6 +807,7 @@ class ReviewTaskService:
             change_files_context=self._change_files_context(file_name),
             related_files_context=related_files_context,
             static_analysis_context=static_analysis_context,
+            background=background,
             settings=self.rule_settings,
         )
         if self.llm_client.is_mock:
@@ -897,7 +946,7 @@ class ReviewTaskService:
         return "\n\n".join(sections)
 
     def _static_findings_for_block(self, file_name: str, diff_lines: list[str]) -> list[StaticFinding]:
-        changed_lines = self._added_line_numbers(diff_lines)
+        changed_lines = self.evidence_locator.reviewable_line_numbers(diff_lines)
         if not changed_lines:
             return []
         return [
@@ -980,6 +1029,7 @@ class ReviewTaskService:
         review_root: Path,
         related_files_context: str = "",
         static_analysis_context: str = "",
+        background: str = "",
     ) -> MainResult:
         if self.llm_client.is_mock:
             comments = self._mock_main_comments(diff_lines, target.language)
@@ -1000,6 +1050,7 @@ class ReviewTaskService:
             change_files_context=self._change_files_context(target.file_name),
             related_files_context=related_files_context,
             static_analysis_context=static_analysis_context,
+            background=background,
             settings=self.rule_settings,
         )
         runner = ReviewToolRunner(
@@ -1008,6 +1059,7 @@ class ReviewTaskService:
             current_file_name=target.file_name,
             current_diff_lines=diff_lines,
             diff_map=self.review_context.diff_map,
+            semantic_index=self.semantic_index,
         )
         model_rounds: list[ModelRoundTrace] = []
         tool_call_traces: list[ToolCallTrace] = []
@@ -1182,6 +1234,7 @@ class ReviewTaskService:
         target: ReviewTarget,
         diff_lines: list[str],
         issues: list[Issue],
+        background: str = "",
     ) -> tuple[list[Issue], list[ModelRoundTrace], str]:
         if not issues:
             return issues, [], ""
@@ -1212,6 +1265,7 @@ class ReviewTaskService:
             diff_lines=diff_lines,
             full_code=target.full_code,
             issues=[self._issue_payload(issue) for issue in unresolved],
+            background=background,
             settings=self.rule_settings,
         )
         response, llm_rounds, failure_message = self._run_json_stage(
@@ -1236,6 +1290,7 @@ class ReviewTaskService:
         target: ReviewTarget,
         diff_lines: list[str],
         issues: list[Issue],
+        background: str = "",
     ) -> tuple[list[Issue], list[ModelRoundTrace], str]:
         if not issues:
             return issues, [], ""
@@ -1266,6 +1321,7 @@ class ReviewTaskService:
             diff_lines=diff_lines,
             full_code=target.full_code,
             issues=[self._issue_payload(issue) for issue in candidates],
+            background=background,
             settings=self.rule_settings,
         )
         response, llm_rounds, failure_message = self._run_json_stage(
@@ -1603,7 +1659,7 @@ class ReviewTaskService:
         only_unresolved: bool = False,
         preserve_existing_filtered: bool = False,
     ) -> None:
-        added_line_numbers = self._added_line_numbers(diff_lines)
+        reviewable_line_numbers = self.evidence_locator.reviewable_line_numbers(diff_lines)
         for issue in issues:
             if only_unresolved and issue.filter_status:
                 continue
@@ -1637,8 +1693,8 @@ class ReviewTaskService:
                 and issue.evidence_match_score < self.settings.review_line_evidence_min_similarity
             ):
                 reason = f"existing_code 与本次变更代码匹配度 {issue.evidence_match_score:.2f} 低于阈值。"
-            elif added_line_numbers and not any(line in added_line_numbers for line in line_numbers):
-                reason = "issue 行号不在本次新增/变更行中。"
+            elif reviewable_line_numbers and not any(line in reviewable_line_numbers for line in line_numbers):
+                reason = "issue 行号不在本次新增/变更行或删除块相邻存活行中。"
 
             if reason:
                 issue.issue_show = False
@@ -2290,7 +2346,11 @@ class ReviewTaskService:
             "total_tokens": sum(round_trace.total_tokens or 0 for round_trace in model_rounds),
             "reasoning_tokens": sum(round_trace.reasoning_tokens or 0 for round_trace in model_rounds),
             "cached_tokens": sum(round_trace.cached_tokens or 0 for round_trace in model_rounds),
-            "elapsed_ms": sum(round_trace.elapsed_ms or 0 for round_trace in model_rounds),
+            "elapsed_ms": sum(
+                round_trace.elapsed_ms or 0
+                for round_trace in model_rounds
+                if round_trace.model != "local"
+            ),
         }
 
     def _summarize_messages(self, messages: list[dict[str, Any]]) -> str:

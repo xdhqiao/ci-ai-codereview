@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     review_tool_max_search_matches: int = 100
     review_tool_max_file_bytes: int = 2 * 1024 * 1024
     review_tool_timeout_seconds: int = 10
+    review_semantic_index_enabled: bool = True
+    review_semantic_index_max_files: int = 5000
+    review_semantic_index_max_file_bytes: int = 2 * 1024 * 1024
+    review_semantic_index_max_results: int = 100
+    review_semantic_index_build_timeout_seconds: int = 60
 
     mock_project_id: str = "mock-project"
     mock_parent_path: str = ""

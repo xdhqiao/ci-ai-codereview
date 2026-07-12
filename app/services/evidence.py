@@ -66,11 +66,7 @@ class CodeEvidenceLocator:
         if not target_lines:
             return EvidenceMatch()
 
-        changed_lines = {
-            line_number
-            for line_number, marker, _ in self._iter_diff_lines(diff_lines)
-            if marker == "+"
-        }
+        changed_lines = self.reviewable_line_numbers(diff_lines)
         diff_source = self._diff_new_side(diff_lines)
         file_source = self._full_file_lines(full_code, changed_lines)
 
@@ -93,6 +89,21 @@ class CodeEvidenceLocator:
         if not fuzzy_candidates:
             return EvidenceMatch(score=self._best_score(diff_source, file_source, target_lines))
         return self._select(fuzzy_candidates, claimed_line_numbers or [], exact=False)
+
+    def reviewable_line_numbers(self, diff_lines: list[str]) -> set[int]:
+        parsed = list(self._iter_diff_lines(diff_lines))
+        reviewable = {line_number for line_number, marker, _ in parsed if marker == "+"}
+        deletion_indexes = [index for index, (_, marker, _) in enumerate(parsed) if marker == "-"]
+        for index in deletion_indexes:
+            for neighbor_range in (range(index + 1, len(parsed)), range(index - 1, -1, -1)):
+                for neighbor_index in neighbor_range:
+                    line_number, marker, _ = parsed[neighbor_index]
+                    if marker == "-":
+                        continue
+                    if marker in {" ", "+"}:
+                        reviewable.add(line_number)
+                    break
+        return reviewable
 
     def _select(self, candidates: list[_Candidate], claimed: list[int], exact: bool) -> EvidenceMatch:
         claimed_line = claimed[0] if claimed else 0
@@ -164,12 +175,13 @@ class CodeEvidenceLocator:
         return candidates
 
     def _candidate(self, window: list[_SourceLine], score: float) -> _Candidate:
+        evidence_source = next((line.source for line in window if line.changed), window[0].source)
         return _Candidate(
             start_line=window[0].line_number,
             end_line=window[-1].line_number,
             score=score,
             changed_line_overlap=any(line.changed for line in window),
-            source=window[0].source,
+            source=evidence_source,
             matched_code="\n".join(line.raw for line in window),
         )
 
@@ -229,6 +241,12 @@ class CodeEvidenceLocator:
 
     def _diff_new_side(self, diff_lines: list[str]) -> list[_SourceLine]:
         source: list[_SourceLine] = []
+        reviewable_lines = self.reviewable_line_numbers(diff_lines)
+        added_lines = {
+            line_number
+            for line_number, marker, _ in self._iter_diff_lines(diff_lines)
+            if marker == "+"
+        }
         for line_number, marker, code in self._iter_diff_lines(diff_lines):
             if marker not in {"+", " "}:
                 continue
@@ -240,8 +258,14 @@ class CodeEvidenceLocator:
                     line_number=line_number,
                     normalized=normalized,
                     raw=code,
-                    changed=marker == "+",
-                    source="diff",
+                    changed=line_number in reviewable_lines,
+                    source=(
+                        "diff"
+                        if line_number in added_lines
+                        else "diff_deletion_anchor"
+                        if line_number in reviewable_lines
+                        else "diff"
+                    ),
                 )
             )
         return source

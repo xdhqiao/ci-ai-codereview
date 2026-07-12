@@ -219,6 +219,8 @@ class CodeFileResponse(BaseModel):
     copy_from_version: str
     task_type: int | None
     file_name: str
+    background: str
+    background_source: str
     code_blocks: list[CodeBlockResponse]
     code_line_num: int
     add_code_line_num: int
@@ -242,6 +244,8 @@ class CodeFileResponse(BaseModel):
             copy_from_version=code_file.copy_from_version,
             task_type=code_file.task_type,
             file_name=code_file.file_name,
+            background=code_file.background or "",
+            background_source=code_file.background_source or "",
             code_blocks=[CodeBlockResponse.from_model(block) for block in code_file.code_blocks],
             code_line_num=code_file.code_line_num or 0,
             add_code_line_num=code_file.add_code_line_num or 0,

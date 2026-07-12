@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings
+from app.services.semantic_index import SemanticIndex
 
 
 class ReviewToolRunner:
@@ -18,6 +19,7 @@ class ReviewToolRunner:
         current_file_name: str = "",
         current_diff_lines: list[str] | None = None,
         diff_map: dict[str, list[str]] | None = None,
+        semantic_index: SemanticIndex | None = None,
     ) -> None:
         self.root_dir = root_dir.resolve()
         self.settings = settings
@@ -26,6 +28,9 @@ class ReviewToolRunner:
         self.diff_map = {self._normalize_repo_path(path): list(lines) for path, lines in (diff_map or {}).items()}
         if current_file_name and current_file_name not in self.diff_map:
             self.diff_map[self._normalize_repo_path(current_file_name)] = list(self.current_diff_lines)
+        self.semantic_index = semantic_index
+        if self.settings.review_semantic_index_enabled and self.semantic_index is None:
+            self.semantic_index = SemanticIndex(self.root_dir, self.settings)
         self.comments: list[dict[str, Any]] = []
         self.done = False
         self.done_state = ""
@@ -45,6 +50,12 @@ class ReviewToolRunner:
                 result = self.code_search(arguments)
             elif name in {"read_file", "file_read"}:
                 result = self.read_file(arguments)
+            elif name == "find_definition":
+                result = self.find_definition(arguments)
+            elif name == "find_references":
+                result = self.find_references(arguments)
+            elif name == "call_graph":
+                result = self.call_graph(arguments)
             elif name == "code_comment":
                 result = self.code_comment(arguments)
             elif name == "task_done":
@@ -169,6 +180,38 @@ class ReviewToolRunner:
             "lines": selected,
         }
 
+    def find_definition(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        index = self._required_semantic_index()
+        symbol = str(arguments.get("symbol") or "").strip()
+        current_file = self._optional_safe_repo_path(
+            str(arguments.get("file_path") or self.current_file_name or "")
+        )
+        return index.find_definition(
+            symbol=symbol,
+            current_file=current_file,
+            limit=self._semantic_limit(arguments.get("limit"), 20),
+        )
+
+    def find_references(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        index = self._required_semantic_index()
+        symbol = str(arguments.get("symbol") or "").strip()
+        file_path = self._optional_safe_repo_path(str(arguments.get("file_path") or ""))
+        return index.find_references(
+            symbol=symbol,
+            file_path=file_path,
+            include_declarations=bool(arguments.get("include_declarations", False)),
+            limit=self._semantic_limit(arguments.get("limit"), self.settings.review_semantic_index_max_results),
+        )
+
+    def call_graph(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        index = self._required_semantic_index()
+        return index.call_graph(
+            symbol=str(arguments.get("symbol") or "").strip(),
+            direction=str(arguments.get("direction") or "both").lower(),
+            depth=int(arguments.get("depth") or 1),
+            limit=self._semantic_limit(arguments.get("limit"), self.settings.review_semantic_index_max_results),
+        )
+
     def code_comment(self, arguments: dict[str, Any]) -> dict[str, Any]:
         raw_comments = arguments.get("comments")
         if not isinstance(raw_comments, list):
@@ -258,10 +301,36 @@ class ReviewToolRunner:
         }
 
     def _cache_key(self, name: str, arguments: dict[str, Any]) -> str:
-        if name not in {"file_find", "file_read_diff", "code_search", "read_file", "file_read"}:
+        if name not in {
+            "file_find",
+            "file_read_diff",
+            "code_search",
+            "read_file",
+            "file_read",
+            "find_definition",
+            "find_references",
+            "call_graph",
+        }:
             return ""
         canonical_name = "file_read" if name == "read_file" else name
         return canonical_name + ":" + json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
+
+    def _required_semantic_index(self) -> SemanticIndex:
+        if not self.settings.review_semantic_index_enabled or self.semantic_index is None:
+            raise ValueError("Semantic index is disabled")
+        return self.semantic_index
+
+    def _optional_safe_repo_path(self, file_path: str) -> str:
+        if not file_path:
+            return ""
+        return self._safe_path(file_path).relative_to(self.root_dir).as_posix()
+
+    def _semantic_limit(self, value: Any, default: int) -> int:
+        try:
+            requested = int(value) if value is not None else int(default)
+        except (TypeError, ValueError):
+            requested = int(default)
+        return min(max(1, requested), max(1, self.settings.review_semantic_index_max_results))
 
     def _bounded_limit(self, value: Any, default: int) -> int:
         try:

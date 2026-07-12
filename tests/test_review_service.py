@@ -6,6 +6,7 @@ from app.core.config import Settings, get_settings
 from app.models.code_file import CodeBlock, CodeFileModel, Issue
 from app.models.task import TaskModel
 from app.services.diff_service import ReviewTarget
+from app.services.background import FileReviewBackground
 from app.services.review_service import ReviewTaskService
 
 
@@ -509,6 +510,83 @@ def test_local_relocation_moves_issue_to_changed_line(tmp_path: Path):
     assert traces[0].stage == "re_location_task"
 
 
+def test_deletion_only_regression_anchors_to_affected_surviving_line():
+    service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=True))
+    diff_lines = [
+        "     1   int safe_divide(int left, int right, int *result) {",
+        "     2-      if (result == 0 || right == 0) {",
+        "     3-          return -1;",
+        "     4-      }",
+        "     2       *result = left / right;",
+        "     3       return 0;",
+        "     4   }",
+    ]
+    target = ReviewTarget(
+        file_name="math_utils.c",
+        diff_lines=diff_lines,
+        full_code="int safe_divide(int left, int right, int *result) {\n    *result = left / right;\n    return 0;\n}\n",
+        language="C",
+        code_line_num=4,
+        add_code_line_num=0,
+    )
+    issue = Issue(
+        issue_id=1,
+        type="logic",
+        severity=5,
+        description="removed validation permits null dereference and division by zero",
+        suggestion="restore the validation before division",
+        issue_line_numbers="2",
+        existing_code="*result = left / right;",
+        evidence="the deleted guard previously rejected a null result and a zero divisor",
+        confidence_level=0.95,
+    )
+
+    relocated, _, relocation_failure = service._run_relocation_task(target, diff_lines, [issue])
+    filtered, _, filter_failure = service._run_review_filter_task(target, diff_lines, relocated)
+
+    assert relocation_failure == ""
+    assert filter_failure == ""
+    assert filtered[0].issue_show is True
+    assert filtered[0].relocation_status == "unchanged"
+    assert filtered[0].evidence_source == "diff_deletion_anchor"
+    assert filtered[0].issue_line_numbers == "2"
+
+
+def test_deletion_anchor_does_not_make_unrelated_context_reviewable():
+    service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=True))
+    diff_lines = [
+        "     1   int run(void) {",
+        "     2-      validate();",
+        "     2       execute();",
+        "     3       audit();",
+        "     4   }",
+    ]
+    target = ReviewTarget(
+        file_name="main.c",
+        diff_lines=diff_lines,
+        full_code="int run(void) {\n    execute();\n    audit();\n}\n",
+        language="C",
+        code_line_num=4,
+        add_code_line_num=0,
+    )
+    issue = Issue(
+        issue_id=1,
+        type="logic",
+        severity=3,
+        description="unrelated audit concern",
+        suggestion="change audit",
+        issue_line_numbers="3",
+        existing_code="audit();",
+        evidence="the line is unchanged and not adjacent to the deletion",
+        confidence_level=0.9,
+    )
+
+    relocated, _, _ = service._run_relocation_task(target, diff_lines, [issue])
+
+    assert relocated[0].relocation_status == "failed"
+    assert relocated[0].issue_show is True
+
+
 def test_local_review_filter_hides_low_confidence_issue():
     service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=True, review_filter_min_confidence=0.5))
     issue = Issue(
@@ -847,7 +925,7 @@ def test_review_resume_is_invalidated_when_model_changes(tmp_path: Path):
     assert second_file.extra["review_fingerprint"] != first_fingerprint
 
 
-def test_full_scan_batch_dedup_filters_duplicate_issue_across_batch(tmp_path: Path):
+def test_full_scan_batch_dedup_groups_without_hiding_file_occurrences(tmp_path: Path):
     target_dir = tmp_path / "head"
     target_dir.mkdir()
     unsafe_code = "void f(char *input) {\n    char dst[8];\n    strcpy(dst, input);\n}\n"
@@ -868,11 +946,13 @@ def test_full_scan_batch_dedup_filters_duplicate_issue_across_batch(tmp_path: Pa
 
     reviewed_task = ReviewTaskService(settings).review_task(task)
 
-    assert reviewed_task.comment_line_number == 1
+    assert reviewed_task.comment_line_number == 2
     code_files = list(CodeFileModel.objects(task_id=str(task.id)).order_by("file_name"))
     all_issues = [issue for code_file in code_files for block in code_file.code_blocks for issue in block.issues]
-    assert sum(1 for issue in all_issues if issue.issue_show is not False) == 1
-    assert any("batch_dedup" in (issue.filter_reason or "") for issue in all_issues)
+    assert all(issue.issue_show is not False for issue in all_issues)
+    assert len({issue.duplicate_group_id for issue in all_issues}) == 1
+    assert all(issue.filter_status != "filtered" for issue in all_issues)
+    assert sum(1 for issue in all_issues if issue.duplicate_of) == 1
     assert "_project_summary" in reviewed_task.developer_issue_summary
     assert reviewed_task.project_summary
 
@@ -1181,9 +1261,68 @@ def test_semantic_batch_dedup_is_strict_and_persists_task_trace():
 
     assert duplicate_count == 1
     assert code_files[0].code_blocks[0].issues[0].issue_show is True
-    assert code_files[1].code_blocks[0].issues[0].issue_show is False
+    assert code_files[1].code_blocks[0].issues[0].issue_show is True
     assert code_files[1].code_blocks[0].issues[0].duplicate_of.startswith("a.c#block1")
+    assert code_files[1].code_blocks[0].issues[0].filter_status == ""
     assert service.task_model_rounds[0].stage == "batch_dedup_task_1"
+
+
+def test_file_background_is_injected_into_prompts_and_persisted(tmp_path: Path):
+    class CapturingBackgroundProvider:
+        def __init__(self):
+            self.call_count = 0
+
+        def get_background(self, project_id: str, review_version: str, file_name: str):
+            self.call_count += 1
+            assert project_id == "background-project"
+            assert file_name == "auth.c"
+            return FileReviewBackground(
+                content="Authentication failures must fail closed.",
+                source="test:requirement",
+            )
+
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "auth.c").write_text("int authenticate(void) { return 0; }\n", encoding="utf-8")
+    task = TaskModel(
+        project_id="background-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    provider = CapturingBackgroundProvider()
+    service = ReviewTaskService(
+        Settings(mongo_mock=True, llm_mock_enabled=True),
+        background_provider=provider,
+    )
+
+    service.review_task(task)
+
+    code_file = CodeFileModel.objects(task_id=str(task.id)).first()
+    assert code_file.background == "Authentication failures must fail closed."
+    assert code_file.background_source == "test:requirement"
+    assert code_file.extra["background_source"] == "test:requirement"
+    assert provider.call_count == 1
+
+    from app.services.prompts import build_main_messages, build_plan_messages
+
+    plan_messages = build_plan_messages(
+        file_name="auth.c",
+        language="C",
+        diff_lines=["     1+  int authenticate(void) { return 0; }"],
+        full_code="int authenticate(void) { return 0; }\n",
+        background=code_file.background,
+    )
+    main_messages = build_main_messages(
+        file_name="auth.c",
+        language="C",
+        diff_lines=["     1+  int authenticate(void) { return 0; }"],
+        full_code="int authenticate(void) { return 0; }\n",
+        plan_guidance="{}",
+        background=code_file.background,
+    )
+    assert code_file.background in plan_messages[1]["content"]
+    assert code_file.background in main_messages[1]["content"]
 
 
 def test_full_scan_llm_project_summary_and_task_usage_are_persisted():

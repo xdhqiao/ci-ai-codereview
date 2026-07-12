@@ -100,15 +100,23 @@ def _task_summary(task: TaskModel) -> dict:
 
 def _code_file_summary(code_file: CodeFileModel) -> dict:
     issues = [issue for block in code_file.code_blocks for issue in block.issues]
+    tool_names = [trace.tool_name for block in code_file.code_blocks for trace in block.tool_calls]
+    semantic_tool_names = {"find_definition", "find_references", "call_graph"}
     return {
         "task_id": code_file.task_id,
         "file_name": code_file.file_name,
+        "background_source": code_file.background_source,
+        "has_background": bool(code_file.background),
         "task_type": code_file.task_type,
         "block_count": len(code_file.code_blocks),
         "add_code_line_num": code_file.add_code_line_num,
         "issue_count": len(issues),
         "max_severity": max((issue.severity for issue in issues), default=0),
         "issue_types": sorted({issue.type for issue in issues}),
+        "hidden_issue_count": sum(1 for issue in issues if issue.issue_show is False),
+        "duplicate_group_count": len({issue.duplicate_group_id for issue in issues if issue.duplicate_group_id}),
+        "tool_names": sorted(set(tool_names)),
+        "semantic_tool_call_count": sum(1 for name in tool_names if name in semantic_tool_names),
         "failure_block_count": sum(1 for block in code_file.code_blocks if block.failure_message),
         "main_task_completed": all(block.main_task_completed for block in code_file.code_blocks),
         "main_task_completion_modes": [block.main_task_completion_mode for block in code_file.code_blocks],
