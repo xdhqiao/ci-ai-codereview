@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.models.task import TaskModel
+from app.schemas.code_file import ModelRoundTraceResponse
 
 
 class TaskCreate(BaseModel):
@@ -34,9 +35,23 @@ class TaskResponse(BaseModel):
     code_block_num: int
     file_num: int
     reviewed_file_num: int
+    resumed_file_num: int
+    skipped_file_num: int
+    incomplete_file_num: int
+    completion_status: str
     add_code_line_num: int
     comment_line_number: int
     process_time: int
+    estimated_token_num: int
+    consumed_estimated_token_num: int
+    token_budget_num: int
+    llm_prompt_tokens: int
+    llm_completion_tokens: int
+    llm_total_tokens: int
+    llm_elapsed_ms: int
+    tool_call_summary: dict
+    task_model_rounds: list[ModelRoundTraceResponse]
+    project_summary: str
     parent_path: str | None
     developer_issue_summary: dict
     created_by: str
@@ -64,9 +79,23 @@ class TaskResponse(BaseModel):
             code_block_num=task.code_block_num or 0,
             file_num=task.file_num or 0,
             reviewed_file_num=task.reviewed_file_num or 0,
+            resumed_file_num=task.resumed_file_num or 0,
+            skipped_file_num=task.skipped_file_num or 0,
+            incomplete_file_num=task.incomplete_file_num or 0,
+            completion_status=task.completion_status or "",
             add_code_line_num=task.add_code_line_num or 0,
             comment_line_number=task.comment_line_number or 0,
             process_time=task.process_time or 0,
+            estimated_token_num=task.estimated_token_num or 0,
+            consumed_estimated_token_num=task.consumed_estimated_token_num or 0,
+            token_budget_num=task.token_budget_num or 0,
+            llm_prompt_tokens=task.llm_prompt_tokens or 0,
+            llm_completion_tokens=task.llm_completion_tokens or 0,
+            llm_total_tokens=task.llm_total_tokens or 0,
+            llm_elapsed_ms=task.llm_elapsed_ms or 0,
+            tool_call_summary=task.tool_call_summary or {},
+            task_model_rounds=[ModelRoundTraceResponse.from_model(trace) for trace in task.task_model_rounds],
+            project_summary=task.project_summary or "",
             parent_path=task.parent_path,
             developer_issue_summary=task.developer_issue_summary or {},
             created_by=task.created_by or "",

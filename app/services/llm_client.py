@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 import httpx
@@ -26,11 +27,20 @@ class LLMClient:
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if self.is_mock:
-            return {"role": "assistant", "content": "{}"}
+            return {
+                "role": "assistant",
+                "content": "{}",
+                "_llm_trace": {
+                    "model": self.settings.llm_model,
+                    "usage": {},
+                    "elapsed_ms": 0,
+                    "finish_reason": "mock",
+                },
+            }
 
         payload: dict[str, Any] = {
             "model": self.settings.llm_model,
-            "messages": messages,
+            "messages": [self._sanitize_message(message) for message in messages],
             "temperature": 0.2,
         }
         if tools:
@@ -41,15 +51,25 @@ class LLMClient:
         if self.settings.llm_api_key:
             headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
 
+        started_at = time.monotonic()
         response = httpx.post(
             self._chat_completions_url(),
             headers=headers,
             json=payload,
             timeout=self.settings.llm_timeout_seconds,
         )
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]
+        choice = data["choices"][0]
+        message = choice["message"]
+        message["_llm_trace"] = {
+            "model": data.get("model") or self.settings.llm_model,
+            "usage": data.get("usage") or {},
+            "elapsed_ms": elapsed_ms,
+            "finish_reason": choice.get("finish_reason") or "",
+        }
+        return message
 
     def _chat_completions_url(self) -> str:
         base_url = self.settings.llm_url.rstrip("/")
@@ -72,3 +92,6 @@ class LLMClient:
             if not match:
                 raise
             return json.loads(match.group(0))
+
+    def _sanitize_message(self, message: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in message.items() if not key.startswith("_")}

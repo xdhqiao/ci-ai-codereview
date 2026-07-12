@@ -23,13 +23,34 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 120
     llm_concurrency: int = 4
     llm_max_tool_rounds: int = 30
+    full_scan_max_tool_rounds: int = 60
+    llm_max_consecutive_empty_rounds: int = 3
+    llm_file_timeout_seconds: int = 600
     llm_json_retry_times: int = 2
+    llm_context_compress_rounds: int = 4
+    llm_context_compress_token_threshold: int = 0
+    llm_max_context_tokens: int = 58888
+    llm_context_soft_ratio: float = 0.60
+    llm_context_hard_ratio: float = 0.80
+    llm_context_compression_llm_enabled: bool = True
+    llm_context_keep_recent_messages: int = 6
+    llm_context_summary_max_chars: int = 2000
     llm_mock_enabled: bool = True
 
     diff_token_threshold: int = 10000
     diff_context_lines: int = 10
+    scan_batch_size: int = 20
+    scan_batch_strategy: str = "by-language"
+    full_scan_token_budget: int = 0
+    full_scan_batch_dedup_enabled: bool = True
+    full_scan_batch_dedup_llm_enabled: bool = True
+    full_scan_batch_dedup_min_comments: int = 4
+    full_scan_project_summary_enabled: bool = True
+    full_scan_project_summary_llm_enabled: bool = True
+    full_scan_project_summary_max_issues: int = 200
+    review_resume_enabled: bool = True
     code_repository_root: str = ""
-    review_exclude_dirs: str = ".git,__pycache__,node_modules,.venv,venv,dist,build,.pytest_cache"
+    review_exclude_dirs: str = ".git,.opencodereview,__pycache__,node_modules,.venv,venv,dist,build,.pytest_cache"
     review_allowed_extensions: str = Field(
         default=(
             ".py,.js,.jsx,.ts,.tsx,.go,.java,.kt,.kts,.c,.h,.cpp,.hpp,.cc,.cs,"
@@ -37,6 +58,25 @@ class Settings(BaseSettings):
             ".sh,.bash,.ps1,.html,.css,.scss,.vue"
         )
     )
+    review_rules_path: str = ""
+    review_relocation_enabled: bool = True
+    review_filter_enabled: bool = True
+    review_filter_min_confidence: float = 0.45
+    review_evidence_required: bool = True
+    review_line_evidence_min_similarity: float = 0.55
+    review_allow_heuristic_relocation: bool = False
+    review_change_manifest_limit: int = 500
+    review_related_files_enabled: bool = True
+    review_related_file_limit: int = 8
+    review_related_diff_max_chars: int = 12000
+    review_static_analysis_enabled: bool = True
+    review_static_analysis_sarif_paths: str = ""
+    review_static_analysis_max_findings: int = 2000
+    review_static_analysis_max_report_bytes: int = 20 * 1024 * 1024
+    review_tool_max_read_lines: int = 500
+    review_tool_max_search_matches: int = 100
+    review_tool_max_file_bytes: int = 2 * 1024 * 1024
+    review_tool_timeout_seconds: int = 10
 
     mock_project_id: str = "mock-project"
     mock_parent_path: str = ""

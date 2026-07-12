@@ -1,8 +1,11 @@
+import time
 from pathlib import Path
+from threading import Barrier, BrokenBarrierError
 
 from app.core.config import Settings, get_settings
-from app.models.code_file import CodeFileModel
+from app.models.code_file import CodeBlock, CodeFileModel, Issue
 from app.models.task import TaskModel
+from app.services.diff_service import ReviewTarget
 from app.services.review_service import ReviewTaskService
 
 
@@ -25,9 +28,200 @@ class FakeRetryLLMClient:
 
     def chat(self, messages, tools=None):
         self.chat_count += 1
+        joined = "\n".join(str(message.get("content") or "") for message in messages)
+        if "REVIEW_FILTER_TASK" in joined:
+            return {
+                "role": "assistant",
+                "content": (
+                    '{"decisions":[{"issue_id":1,"issue_show":true,'
+                    '"filter_status":"kept","filter_reason":"not disproved"}]}'
+                ),
+            }
         if self.chat_count == 1:
+            return {
+                "role": "assistant",
+                "content": (
+                    '{"comment":"plan ok","logic_score":80,"performance_score":80,'
+                    '"security_score":80,"readable_score":80,"code_style_score":80}'
+                ),
+            }
+        if self.chat_count == 2:
             return {"role": "assistant", "content": "not-json"}
         return {"role": "assistant", "content": self.comments}
+
+    def _extract_json(self, content):
+        import json
+
+        return json.loads(content)
+
+
+class FakeToolTraceLLMClient:
+    is_mock = False
+
+    def __init__(self):
+        self.chat_count = 0
+        self.main_count = 0
+
+    def chat(self, messages, tools=None):
+        self.chat_count += 1
+        joined = "\n".join(str(message.get("content") or "") for message in messages)
+        if "REVIEW_FILTER_TASK" in joined:
+            return {
+                "role": "assistant",
+                "content": (
+                    '{"decisions":[{"issue_id":1,"issue_show":true,'
+                    '"filter_status":"kept","filter_reason":"valid","confidence_level":0.9}]}'
+                ),
+                "_llm_trace": {
+                    "model": "fake-model",
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+                    "elapsed_ms": 7,
+                    "finish_reason": "stop",
+                },
+            }
+        if tools is None:
+            return {
+                "role": "assistant",
+                "content": (
+                    '{"comment":"plan ok","logic_score":80,"performance_score":80,'
+                    '"security_score":80,"readable_score":80,"code_style_score":80}'
+                ),
+                "_llm_trace": {
+                    "model": "fake-model",
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                        "prompt_tokens_details": {"cached_tokens": 2},
+                        "completion_tokens_details": {"reasoning_tokens": 3},
+                    },
+                    "elapsed_ms": 11,
+                    "finish_reason": "stop",
+                },
+            }
+        self.main_count += 1
+        if self.main_count == 1:
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "code_comment",
+                            "arguments": (
+                                '{"type":"security","severity":5,"description":"buffer overflow",'
+                                '"suggestion":"use snprintf","issue_line_numbers":"1",'
+                                '"existing_code":"int main(void) { return 0; }",'
+                                '"suggestion_code":"snprintf(dst, sizeof(dst), \\"%s\\", input);",'
+                                '"evidence":"matched changed line"}'
+                            ),
+                        },
+                    }
+                ],
+                "_llm_trace": {
+                    "model": "fake-model",
+                    "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+                    "elapsed_ms": 22,
+                    "finish_reason": "tool_calls",
+                },
+            }
+        if self.main_count == 2:
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "task_done", "arguments": '{"summary":"done"}'},
+                    }
+                ],
+                "_llm_trace": {
+                    "model": "fake-model",
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7},
+                    "elapsed_ms": 5,
+                    "finish_reason": "tool_calls",
+                },
+            }
+        raise AssertionError("unexpected fake LLM call")
+
+    def _extract_json(self, content):
+        import json
+
+        return json.loads(content)
+
+
+class FakeCompressionLLMClient:
+    is_mock = False
+
+    def __init__(self):
+        self.chat_count = 0
+        self.main_count = 0
+
+    def chat(self, messages, tools=None):
+        self.chat_count += 1
+        joined = "\n".join(str(message.get("content") or "") for message in messages)
+        if "REVIEW_FILTER_TASK" in joined:
+            return {
+                "role": "assistant",
+                "content": (
+                    '{"decisions":[{"issue_id":1,"issue_show":true,'
+                    '"filter_status":"kept","filter_reason":"not disproved"}]}'
+                ),
+            }
+        if tools is None:
+            return {
+                "role": "assistant",
+                "content": (
+                    '{"comment":"plan ok","logic_score":80,"performance_score":80,'
+                    '"security_score":80,"readable_score":80,"code_style_score":80}'
+                ),
+            }
+        self.main_count += 1
+        if self.main_count in {1, 2}:
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": f"read_{self.main_count}",
+                        "type": "function",
+                        "function": {"name": "file_read_diff", "arguments": '{"file_path":"main.c"}'},
+                    }
+                ],
+            }
+        if self.main_count == 3:
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "comment_1",
+                        "type": "function",
+                        "function": {
+                            "name": "code_comment",
+                            "arguments": (
+                                '{"type":"security","severity":4,"description":"desc",'
+                                '"suggestion":"fix","issue_line_numbers":"1","existing_code":"int main(void) { return 0; }",'
+                                '"evidence":"matched changed line","confidence_level":0.8}'
+                            ),
+                        },
+                    }
+                ],
+            }
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "done_1",
+                    "type": "function",
+                    "function": {"name": "task_done", "arguments": '{"summary":"done"}'},
+                }
+            ],
+        }
 
     def _extract_json(self, content):
         import json
@@ -158,7 +352,8 @@ def test_main_task_retries_when_json_parse_fails(tmp_path: Path):
     settings = Settings(mongo_mock=True, llm_mock_enabled=False, llm_json_retry_times=1)
     service = ReviewTaskService(settings)
     service.llm_client = FakeRetryLLMClient(
-        '{"issues":[{"type":"security","severity":4,"description":"desc","suggestion":"fix","issue_line_numbers":"1"}]}'
+        '{"issues":[{"type":"security","severity":4,"description":"desc","suggestion":"fix",'
+        '"issue_line_numbers":"1","existing_code":"int main(void) { return 0; }","evidence":"matched"}]}'
     )
 
     reviewed_task = service.review_task(task)
@@ -183,8 +378,10 @@ def test_duplicate_issues_are_merged_within_current_file(tmp_path: Path):
     service = ReviewTaskService(settings)
     service.llm_client = FakeRetryLLMClient(
         '{"issues":['
-        '{"type":"security","severity":4,"description":"same","suggestion":"fix","issue_line_numbers":"1"},'
-        '{"type":"security","severity":4,"description":"same","suggestion":"fix","issue_line_numbers":"1"}'
+        '{"type":"security","severity":4,"description":"same","suggestion":"fix","issue_line_numbers":"1",'
+        '"existing_code":"int main(void) { return 0; }","evidence":"matched"},'
+        '{"type":"security","severity":4,"description":"same","suggestion":"fix","issue_line_numbers":"1",'
+        '"existing_code":"int main(void) { return 0; }","evidence":"matched"}'
         "]}"
     )
 
@@ -193,3 +390,868 @@ def test_duplicate_issues_are_merged_within_current_file(tmp_path: Path):
     assert reviewed_task.comment_line_number == 1
     code_file = CodeFileModel.objects(task_id=str(task.id)).first()
     assert len(code_file.code_blocks[0].issues) == 1
+
+
+def test_semantic_duplicate_issues_merge_only_with_same_line_and_evidence():
+    service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=True))
+    first = Issue(
+        issue_id=1,
+        type="security",
+        severity=5,
+        description="unchecked copy can overflow destination buffer",
+        suggestion="use a bounded copy",
+        issue_line_numbers="12",
+        existing_code="strcpy(dst, src);",
+        evidence="no destination size",
+        issue_show=True,
+    )
+    duplicate = Issue(
+        issue_id=2,
+        type="security",
+        severity=5,
+        description="destination buffer can overflow because copy is unchecked",
+        suggestion="pass the destination size",
+        issue_line_numbers="12",
+        existing_code="strcpy(dst, src);",
+        evidence="the copy is unbounded",
+        issue_show=True,
+    )
+    different_location = Issue(
+        issue_id=3,
+        type="security",
+        severity=5,
+        description="destination buffer can overflow because copy is unchecked",
+        suggestion="pass the destination size",
+        issue_line_numbers="30",
+        existing_code="strcpy(dst, src);",
+        evidence="a separate copy is unbounded",
+        issue_show=True,
+    )
+    block = CodeBlock(block_id=1, contents=[], issues=[first, duplicate, different_location])
+
+    service._merge_duplicate_file_issues([block])
+
+    assert len(block.issues) == 2
+    assert {issue.issue_line_numbers for issue in block.issues} == {"12", "30"}
+
+
+def test_model_rounds_tool_calls_and_usage_are_persisted(tmp_path: Path):
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    task = TaskModel(
+        project_id="trace-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    settings = Settings(mongo_mock=True, llm_mock_enabled=False)
+    service = ReviewTaskService(settings)
+    service.llm_client = FakeToolTraceLLMClient()
+
+    reviewed_task = service.review_task(task)
+
+    assert reviewed_task.comment_line_number == 1
+    code_file = CodeFileModel.objects(task_id=str(task.id)).first()
+    block = code_file.code_blocks[0]
+    assert block.llm_prompt_tokens == 41
+    assert block.llm_completion_tokens == 22
+    assert block.llm_total_tokens == 63
+    assert block.llm_reasoning_tokens == 3
+    assert block.llm_cached_tokens == 2
+    assert block.llm_elapsed_ms == 45
+    assert [trace.stage for trace in block.model_rounds] == [
+        "plan_task",
+        "main_task",
+        "main_task",
+        "re_location_task",
+        "review_filter_task",
+        "review_filter_task",
+    ]
+    assert [trace.tool_name for trace in block.tool_calls] == ["code_comment", "task_done"]
+    assert block.tool_calls[0].success is True
+
+
+def test_local_relocation_moves_issue_to_changed_line(tmp_path: Path):
+    service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=True))
+    target = ReviewTarget(
+        file_name="main.c",
+        diff_lines=[
+            "     1+  int main(void) {",
+            "     2+      char dst[8];",
+            "     3+      strcpy(dst, input);",
+            "     4+      return 0;",
+            "     5+  }",
+        ],
+        full_code="int main(void) {\n    char dst[8];\n    strcpy(dst, input);\n    return 0;\n}\n",
+        language="C",
+        code_line_num=5,
+        add_code_line_num=5,
+    )
+    issue = Issue(
+        issue_id=1,
+        type="security",
+        severity=5,
+        description="buffer overflow from strcpy",
+        suggestion="use snprintf",
+        issue_line_numbers="999",
+        existing_code="strcpy(dst, input);",
+        evidence="strcpy copies input into fixed buffer",
+        confidence_level=0.9,
+    )
+
+    issues, traces, failure = service._run_relocation_task(target, target.diff_lines, [issue])
+
+    assert failure == ""
+    assert issues[0].issue_line_numbers == "3"
+    assert issues[0].original_issue_line_numbers == "999"
+    assert issues[0].relocation_status == "relocated"
+    assert traces[0].stage == "re_location_task"
+
+
+def test_local_review_filter_hides_low_confidence_issue():
+    service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=True, review_filter_min_confidence=0.5))
+    issue = Issue(
+        issue_id=1,
+        type="logic",
+        severity=2,
+        description="maybe wrong",
+        suggestion="check",
+        issue_line_numbers="1",
+        existing_code="int main(void) { return 0; }",
+        evidence="matched changed line",
+        confidence_level=0.2,
+    )
+
+    issues, traces, failure = service._run_review_filter_task(
+        ReviewTarget(
+            file_name="main.c",
+            diff_lines=["     1+  int main(void) { return 0; }"],
+            full_code="int main(void) { return 0; }\n",
+            language="C",
+            code_line_num=1,
+            add_code_line_num=1,
+        ),
+        ["     1+  int main(void) { return 0; }"],
+        [issue],
+    )
+
+    assert failure == ""
+    assert issues[0].issue_show is False
+    assert issues[0].filter_status == "filtered"
+    assert "置信度" in issues[0].filter_reason
+    assert traces[0].stage == "review_filter_task"
+
+
+def test_local_review_filter_hides_mismatched_existing_code():
+    service = ReviewTaskService(
+        Settings(
+            mongo_mock=True,
+            llm_mock_enabled=True,
+            review_line_evidence_min_similarity=0.8,
+        )
+    )
+    issue = Issue(
+        issue_id=1,
+        type="security",
+        severity=5,
+        description="unsafe copy",
+        suggestion="use snprintf",
+        issue_line_numbers="1",
+        existing_code="strcpy(dst, input);",
+        evidence="unsafe copy should be present in changed line",
+        confidence_level=0.9,
+    )
+
+    issues, _, _ = service._run_review_filter_task(
+        ReviewTarget(
+            file_name="main.c",
+            diff_lines=["     1+  int main(void) { return 0; }"],
+            full_code="int main(void) { return 0; }\n",
+            language="C",
+            code_line_num=1,
+            add_code_line_num=1,
+        ),
+        ["     1+  int main(void) { return 0; }"],
+        [issue],
+    )
+
+    assert issues[0].issue_show is False
+    assert issues[0].evidence_match_status == "missing"
+    assert "existing_code" in issues[0].filter_reason
+
+
+def test_main_task_context_compression_is_persisted(tmp_path: Path):
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    task = TaskModel(
+        project_id="compression-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    settings = Settings(
+        mongo_mock=True,
+        llm_mock_enabled=False,
+        llm_context_compress_rounds=2,
+        llm_max_tool_rounds=5,
+    )
+    service = ReviewTaskService(settings)
+    service.llm_client = FakeCompressionLLMClient()
+
+    reviewed_task = service.review_task(task)
+
+    assert reviewed_task.comment_line_number == 1
+    code_file = CodeFileModel.objects(task_id=str(task.id)).first()
+    block = code_file.code_blocks[0]
+    assert block.memory_compression_count >= 1
+    assert "memory_compression" in [trace.stage for trace in block.model_rounds]
+
+
+def test_main_task_context_compression_uses_token_threshold(tmp_path: Path):
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    task = TaskModel(
+        project_id="compression-token-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    settings = Settings(
+        mongo_mock=True,
+        llm_mock_enabled=False,
+        llm_context_compress_rounds=0,
+        llm_context_compress_token_threshold=20,
+        llm_max_tool_rounds=5,
+    )
+    service = ReviewTaskService(settings)
+    service.llm_client = FakeCompressionLLMClient()
+
+    service.review_task(task)
+
+    code_file = CodeFileModel.objects(task_id=str(task.id)).first()
+    block = code_file.code_blocks[0]
+    compression_traces = [trace for trace in block.model_rounds if trace.stage == "memory_compression"]
+    assert compression_traces
+    assert '"trigger": "token"' in compression_traces[0].request_summary
+
+
+def test_external_json_rule_resolver_is_used(tmp_path: Path):
+    rule_path = tmp_path / "rules.json"
+    rule_path.write_text(
+        '{"languages":[{"language":"C","extensions":[".c"],"focus":["custom c rule"]}]}',
+        encoding="utf-8",
+    )
+    from app.services.rules import ReviewRuleResolver
+
+    resolver = ReviewRuleResolver(Settings(mongo_mock=True, review_rules_path=str(rule_path)))
+
+    resolved = resolver.resolve("src/main.c", "C")
+
+    assert "custom c rule" in resolved["focus"]
+
+    from app.services.prompts import build_plan_messages
+
+    messages = build_plan_messages(
+        file_name="src/main.c",
+        language="C",
+        diff_lines=["     1+  int main(void) { return 0; }"],
+        full_code="int main(void) { return 0; }\n",
+        settings=Settings(mongo_mock=True, review_rules_path=str(rule_path)),
+    )
+    assert "custom c rule" in messages[1]["content"]
+
+
+def test_project_local_ocr_rule_is_auto_discovered(tmp_path: Path):
+    rule_dir = tmp_path / ".opencodereview"
+    rule_dir.mkdir()
+    rule_path = rule_dir / "rule.json"
+    rule_path.write_text(
+        '{"rules":[{"path":"**/*.c","rule":"project-local rule"}]}',
+        encoding="utf-8",
+    )
+    service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=True))
+
+    resolved_settings = service._resolve_rule_settings(tmp_path)
+
+    assert resolved_settings.review_rules_path == str(rule_path)
+    from app.services.rules import ReviewRuleResolver
+
+    assert ReviewRuleResolver(resolved_settings).resolve("main.c", "C")["focus"] == ["project-local rule"]
+
+
+def test_ocr_style_rules_use_first_match_and_brace_expansion(tmp_path: Path):
+    from app.services.rules import ReviewRuleResolver
+
+    rule_path = tmp_path / "ocr-rules.json"
+    rule_path.write_text(
+        (
+            '{"rules":['
+            '{"id":"specific","path":"src/*.{c,h}","rule":"specific source rule"},'
+            '{"id":"fallback","path":"**/*.c","rule":"fallback c rule"}'
+            ']}'
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(mongo_mock=True, llm_mock_enabled=True, review_rules_path=str(rule_path))
+
+    resolved = ReviewRuleResolver(settings).resolve("src/main.c", "C")
+
+    assert resolved["focus"] == ["specific source rule"]
+    assert resolved["matched_rule_id"] == "specific"
+    assert resolved["resolution"] == "first-match"
+
+
+def test_file_level_concurrency_uses_configured_limit(tmp_path: Path):
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "a.c").write_text("int a(void) { return 0; }\n", encoding="utf-8")
+    (target_dir / "b.c").write_text("int b(void) { return 0; }\n", encoding="utf-8")
+    task = TaskModel(
+        project_id="concurrency-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    settings = Settings(mongo_mock=True, llm_mock_enabled=True, llm_concurrency=2, scan_batch_size=2)
+    service = ReviewTaskService(settings)
+    barrier = Barrier(2, timeout=2)
+    overlapped = {"value": False}
+
+    def fake_review_file(task_model, target, review_root):
+        try:
+            barrier.wait()
+            overlapped["value"] = True
+        except BrokenBarrierError:
+            overlapped["value"] = False
+        return CodeFileModel(
+            task_id=str(task_model.id),
+            project_id=task_model.project_id,
+            review_version=task_model.review_version,
+            copy_from_version=task_model.copy_from_version,
+            task_type=task_model.task_type,
+            file_name=target.file_name,
+            code_blocks=[],
+        )
+
+    service._review_file = fake_review_file
+
+    reviewed_task = service.review_task(task)
+
+    assert reviewed_task.state == 2
+    assert overlapped["value"] is True
+
+
+def test_full_scan_batches_are_grouped_by_language():
+    service = ReviewTaskService(
+        Settings(mongo_mock=True, llm_mock_enabled=True, scan_batch_strategy="by-language")
+    )
+    task = TaskModel(
+        project_id="batch-language",
+        review_version="head",
+        copy_from_version="0_version",
+        task_type=2,
+        state=0,
+    )
+    targets = [
+        ReviewTarget("b.py", [], "", "Python", 0, 0, change_type="FULL"),
+        ReviewTarget("a.c", [], "", "C", 0, 0, change_type="FULL"),
+        ReviewTarget("c.c", [], "", "C", 0, 0, change_type="FULL"),
+    ]
+
+    batches = service._group_target_batches(task, targets, batch_size=2)
+
+    assert [[target.file_name for target in batch] for batch in batches] == [["a.c", "c.c"], ["b.py"]]
+
+
+def test_full_scan_token_budget_skips_files(tmp_path: Path):
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "a.c").write_text("int a(void) { return 0; }\n", encoding="utf-8")
+    (target_dir / "b.c").write_text(("int b(void) { return 0; }\n" * 80), encoding="utf-8")
+    task = TaskModel(
+        project_id="budget-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    settings = Settings(mongo_mock=True, llm_mock_enabled=True, full_scan_token_budget=20)
+
+    reviewed_task = ReviewTaskService(settings).review_task(task)
+
+    assert reviewed_task.state == 3
+    assert reviewed_task.completion_status == "partial"
+    assert reviewed_task.incomplete_file_num == 1
+    assert reviewed_task.skipped_file_num == 1
+    assert reviewed_task.token_budget_num == 20
+    skipped = CodeFileModel.objects(task_id=str(task.id), file_name="b.c").first()
+    assert skipped.extra["status"] == "skipped_budget"
+    assert skipped.code_blocks == []
+
+
+def test_review_task_resume_reuses_completed_file(tmp_path: Path):
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    task = TaskModel(
+        project_id="resume-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    settings = Settings(mongo_mock=True, llm_mock_enabled=True, review_resume_enabled=True)
+    service = ReviewTaskService(settings)
+
+    service.review_task(task)
+    task.reload()
+    task.state = 0
+    task.save()
+    reviewed_task = service.review_task(task)
+
+    assert reviewed_task.resumed_file_num == 1
+    assert reviewed_task.reviewed_file_num == 1
+    assert CodeFileModel.objects(task_id=str(task.id)).count() == 1
+    code_file = CodeFileModel.objects(task_id=str(task.id)).first()
+    assert code_file.extra["status"] == "resumed"
+
+
+def test_review_resume_is_invalidated_when_model_changes(tmp_path: Path):
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    task = TaskModel(
+        project_id="resume-model-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+
+    ReviewTaskService(
+        Settings(mongo_mock=True, llm_mock_enabled=True, llm_model="model-a")
+    ).review_task(task)
+    task.reload()
+    first_file = CodeFileModel.objects(task_id=str(task.id)).first()
+    first_fingerprint = first_file.extra["review_fingerprint"]
+    task.state = 0
+    task.save()
+
+    reviewed_task = ReviewTaskService(
+        Settings(mongo_mock=True, llm_mock_enabled=True, llm_model="model-b")
+    ).review_task(task)
+    second_file = CodeFileModel.objects(task_id=str(task.id)).first()
+
+    assert reviewed_task.resumed_file_num == 0
+    assert second_file.extra["status"] == "reviewed"
+    assert second_file.extra["review_fingerprint"] != first_fingerprint
+
+
+def test_full_scan_batch_dedup_filters_duplicate_issue_across_batch(tmp_path: Path):
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    unsafe_code = "void f(char *input) {\n    char dst[8];\n    strcpy(dst, input);\n}\n"
+    (target_dir / "a.c").write_text(unsafe_code, encoding="utf-8")
+    (target_dir / "b.c").write_text(unsafe_code, encoding="utf-8")
+    task = TaskModel(
+        project_id="dedup-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    settings = Settings(
+        mongo_mock=True,
+        llm_mock_enabled=True,
+        scan_batch_size=2,
+        full_scan_batch_dedup_enabled=True,
+    )
+
+    reviewed_task = ReviewTaskService(settings).review_task(task)
+
+    assert reviewed_task.comment_line_number == 1
+    code_files = list(CodeFileModel.objects(task_id=str(task.id)).order_by("file_name"))
+    all_issues = [issue for code_file in code_files for block in code_file.code_blocks for issue in block.issues]
+    assert sum(1 for issue in all_issues if issue.issue_show is not False) == 1
+    assert any("batch_dedup" in (issue.filter_reason or "") for issue in all_issues)
+    assert "_project_summary" in reviewed_task.developer_issue_summary
+    assert reviewed_task.project_summary
+
+
+def test_multiline_evidence_is_relocated_as_one_contiguous_range():
+    service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=True))
+    diff_lines = [
+        "     1+  int copy(char *dst, const char *src) {",
+        "     2+      strcpy(dst, src);",
+        "     3+      return 0;",
+        "     4+  }",
+    ]
+    target = ReviewTarget(
+        file_name="copy.c",
+        diff_lines=diff_lines,
+        full_code="int copy(char *dst, const char *src) {\n    strcpy(dst, src);\n    return 0;\n}\n",
+        language="C",
+        code_line_num=4,
+        add_code_line_num=4,
+    )
+    issue = Issue(
+        issue_id=1,
+        type="security",
+        severity=5,
+        description="unbounded copy",
+        suggestion="pass the destination capacity",
+        issue_line_numbers="999",
+        existing_code="strcpy(dst, src);\nreturn 0;",
+        evidence="the copy has no destination bound",
+        confidence_level=0.95,
+    )
+
+    issues, _, failure = service._run_relocation_task(target, diff_lines, [issue])
+
+    assert failure == ""
+    assert issues[0].issue_line_numbers == "2-3"
+    assert issues[0].evidence_start_line == 2
+    assert issues[0].evidence_end_line == 3
+    assert issues[0].evidence_match_status == "matched"
+    assert issues[0].evidence_occurrence_count == 1
+
+
+def test_ambiguous_evidence_without_valid_original_line_is_not_guessed():
+    service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=True))
+    diff_lines = [
+        "     1+  if (ready) return 0;",
+        "     2+  work();",
+        "     3+  if (ready) return 0;",
+    ]
+    target = ReviewTarget(
+        file_name="duplicate.c",
+        diff_lines=diff_lines,
+        full_code="if (ready) return 0;\nwork();\nif (ready) return 0;\n",
+        language="C",
+        code_line_num=3,
+        add_code_line_num=3,
+    )
+    issue = Issue(
+        issue_id=1,
+        type="logic",
+        severity=3,
+        description="ambiguous return",
+        suggestion="clarify the branch",
+        issue_line_numbers="999",
+        existing_code="if (ready) return 0;",
+        evidence="the same code appears twice",
+        confidence_level=0.8,
+    )
+
+    issues, _, _ = service._run_relocation_task(target, diff_lines, [issue])
+
+    assert issues[0].relocation_status == "failed"
+    assert issues[0].location_ambiguous is True
+    assert issues[0].evidence_occurrence_count == 2
+
+
+def test_filter_cannot_remove_issue_without_diff_counter_evidence():
+    service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=True))
+    issue = Issue(
+        issue_id=1,
+        type="logic",
+        severity=3,
+        description="validated issue",
+        suggestion="fix it",
+        issue_line_numbers="1",
+        existing_code="return value;",
+        evidence="the new return bypasses validation",
+        issue_show=True,
+    )
+
+    service._apply_filter_response(
+        [issue],
+        {
+            "decisions": [
+                {
+                    "issue_id": 1,
+                    "issue_show": False,
+                    "filter_status": "filtered",
+                    "filter_reason": "uncertain",
+                }
+            ]
+        },
+    )
+
+    assert issue.issue_show is True
+    assert issue.filter_status == "kept"
+    assert "直接反证" in issue.filter_reason
+
+
+def test_main_task_without_task_done_is_persisted_as_partial(tmp_path: Path):
+    class NoDoneLLMClient:
+        is_mock = False
+
+        def chat(self, messages, tools=None):
+            if tools is None:
+                return {
+                    "role": "assistant",
+                    "content": (
+                        '{"comment":"plan","logic_score":80,"performance_score":80,'
+                        '"security_score":80,"readable_score":80,"code_style_score":80}'
+                    ),
+                }
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "read_diff",
+                        "type": "function",
+                        "function": {
+                            "name": "file_read_diff",
+                            "arguments": '{"path_array":["main.c"]}',
+                        },
+                    }
+                ],
+            }
+
+        def _extract_json(self, content):
+            import json
+
+            return json.loads(content)
+
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    task = TaskModel(
+        project_id="strict-completion",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    service = ReviewTaskService(
+        Settings(
+            mongo_mock=True,
+            llm_mock_enabled=False,
+            llm_max_tool_rounds=2,
+            full_scan_max_tool_rounds=2,
+        )
+    )
+    service.llm_client = NoDoneLLMClient()
+
+    reviewed_task = service.review_task(task)
+
+    block = CodeFileModel.objects(task_id=str(task.id)).first().code_blocks[0]
+    assert reviewed_task.state == 3
+    assert block.main_task_completed is False
+    assert block.main_task_completion_mode == "max_rounds"
+    assert "without task_done" in block.failure_message
+
+
+def test_invalid_tool_arguments_are_returned_to_model_without_crashing(tmp_path: Path):
+    class InvalidArgumentsLLMClient:
+        is_mock = False
+
+        def __init__(self):
+            self.main_round = 0
+
+        def chat(self, messages, tools=None):
+            if tools is None:
+                return {
+                    "role": "assistant",
+                    "content": (
+                        '{"comment":"plan","logic_score":80,"performance_score":80,'
+                        '"security_score":80,"readable_score":80,"code_style_score":80}'
+                    ),
+                }
+            self.main_round += 1
+            if self.main_round == 1:
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "bad_args",
+                            "type": "function",
+                            "function": {"name": "code_search", "arguments": "{"},
+                        }
+                    ],
+                }
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "done",
+                        "type": "function",
+                        "function": {"name": "task_done", "arguments": '{"state":"DONE"}'},
+                    }
+                ],
+            }
+
+        def _extract_json(self, content):
+            import json
+
+            return json.loads(content)
+
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    task = TaskModel(
+        project_id="invalid-tool-args",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    service = ReviewTaskService(Settings(mongo_mock=True, llm_mock_enabled=False, review_filter_enabled=False))
+    service.llm_client = InvalidArgumentsLLMClient()
+
+    reviewed_task = service.review_task(task)
+
+    block = CodeFileModel.objects(task_id=str(task.id)).first().code_blocks[0]
+    assert reviewed_task.state == 2
+    assert block.main_task_completed is True
+    assert block.failure_message == ""
+    assert block.tool_calls[0].success is False
+    assert "Invalid arguments" in block.tool_calls[0].error_message
+
+
+def test_semantic_batch_dedup_is_strict_and_persists_task_trace():
+    class DedupLLMClient:
+        is_mock = False
+
+        def chat(self, messages, tools=None):
+            return {
+                "role": "assistant",
+                "content": '{"groups":[{"members":["c-0","c-1"]}]}',
+                "_llm_trace": {
+                    "model": "dedup-model",
+                    "usage": {"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11},
+                    "elapsed_ms": 4,
+                    "finish_reason": "stop",
+                },
+            }
+
+        def _extract_json(self, content):
+            import json
+
+            return json.loads(content)
+
+    settings = Settings(
+        mongo_mock=True,
+        llm_mock_enabled=False,
+        full_scan_batch_dedup_min_comments=2,
+    )
+    service = ReviewTaskService(settings)
+    service.llm_client = DedupLLMClient()
+    task = TaskModel(
+        project_id="semantic-dedup",
+        review_version="head",
+        copy_from_version="0_version",
+        task_type=2,
+        state=1,
+    ).save()
+
+    def make_file(path: str, description: str) -> CodeFileModel:
+        issue = Issue(
+            issue_id=1,
+            type="security",
+            severity=5,
+            description=description,
+            suggestion="use a bounded copy",
+            issue_line_numbers="1",
+            existing_code="strcpy(dst, src);",
+            evidence="the destination bound is unavailable",
+            rule_id="c-buffer-boundary",
+            issue_show=True,
+        )
+        return CodeFileModel(
+            task_id=str(task.id),
+            project_id=task.project_id,
+            review_version=task.review_version,
+            copy_from_version=task.copy_from_version,
+            task_type=2,
+            file_name=path,
+            code_blocks=[CodeBlock(block_id=1, contents=["     1+  strcpy(dst, src);"], issues=[issue])],
+            comment_line_number=1,
+            extra={"status": "reviewed"},
+        ).save()
+
+    code_files = [
+        make_file("a.c", "unchecked copy into a fixed buffer"),
+        make_file("b.c", "fixed buffer copy is unchecked"),
+    ]
+
+    duplicate_count = service._semantic_batch_deduplicate(task, code_files, batch_index=1)
+
+    assert duplicate_count == 1
+    assert code_files[0].code_blocks[0].issues[0].issue_show is True
+    assert code_files[1].code_blocks[0].issues[0].issue_show is False
+    assert code_files[1].code_blocks[0].issues[0].duplicate_of.startswith("a.c#block1")
+    assert service.task_model_rounds[0].stage == "batch_dedup_task_1"
+
+
+def test_full_scan_llm_project_summary_and_task_usage_are_persisted():
+    class SummaryLLMClient:
+        is_mock = False
+
+        def chat(self, messages, tools=None):
+            return {
+                "role": "assistant",
+                "content": "### Top Issues\n- Fix the repeated unchecked copy in `a.c` and `b.c`.",
+                "_llm_trace": {
+                    "model": "summary-model",
+                    "usage": {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13},
+                    "elapsed_ms": 6,
+                    "finish_reason": "stop",
+                },
+            }
+
+    settings = Settings(mongo_mock=True, llm_mock_enabled=False)
+    service = ReviewTaskService(settings)
+    service.llm_client = SummaryLLMClient()
+    task = TaskModel(
+        project_id="summary-project",
+        review_version="head",
+        copy_from_version="0_version",
+        task_type=2,
+        state=1,
+    ).save()
+    code_files: list[CodeFileModel] = []
+    for path in ["a.c", "b.c"]:
+        issue = Issue(
+            issue_id=1,
+            type="security",
+            severity=5,
+            description="unchecked copy",
+            suggestion="use a bounded copy",
+            issue_line_numbers="1",
+            existing_code="strcpy(dst, src);",
+            evidence="the destination bound is unavailable",
+            issue_show=True,
+        )
+        code_files.append(
+            CodeFileModel(
+                task_id=str(task.id),
+                project_id=task.project_id,
+                review_version=task.review_version,
+                copy_from_version=task.copy_from_version,
+                task_type=2,
+                file_name=path,
+                code_blocks=[
+                    CodeBlock(
+                        block_id=1,
+                        contents=["     1+  strcpy(dst, src);"],
+                        issues=[issue],
+                        comment_line_number=1,
+                        main_task_completed=True,
+                    )
+                ],
+                comment_line_number=1,
+                extra={"status": "reviewed", "estimated_tokens": 10},
+            ).save()
+        )
+
+    service._finish_task(task, code_files, started_at=time.monotonic())
+    task.reload()
+
+    assert task.state == 2
+    assert task.project_summary.startswith("### Top Issues")
+    assert task.developer_issue_summary["_project_summary"]["summary_source"] == "llm"
+    assert task.llm_total_tokens == 13
+    assert task.task_model_rounds[0].stage == "project_summary_task"

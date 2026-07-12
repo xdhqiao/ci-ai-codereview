@@ -48,7 +48,9 @@ def main() -> None:
         summary = {
             "repository_root": str(repository_root),
             "llm_max_tool_rounds": settings.llm_max_tool_rounds,
+            "full_scan_max_tool_rounds": settings.full_scan_max_tool_rounds,
             "llm_timeout_seconds": settings.llm_timeout_seconds,
+            "llm_file_timeout_seconds": settings.llm_file_timeout_seconds,
             "elapsed_seconds": elapsed_seconds,
             "tasks": [
                 _task_summary(reviewed_incremental),
@@ -72,7 +74,12 @@ def _task_summary(task: TaskModel) -> dict:
         "copy_from_version": task.copy_from_version,
         "task_type": task.task_type,
         "state": task.state,
+        "completion_status": task.completion_status,
         "file_num": task.file_num,
+        "reviewed_file_num": task.reviewed_file_num,
+        "resumed_file_num": task.resumed_file_num,
+        "skipped_file_num": task.skipped_file_num,
+        "incomplete_file_num": task.incomplete_file_num,
         "code_block_num": task.code_block_num,
         "comment_line_number": task.comment_line_number,
         "scores": {
@@ -83,6 +90,10 @@ def _task_summary(task: TaskModel) -> dict:
             "code_style_score": task.code_style_score,
         },
         "developer_issue_summary": task.developer_issue_summary,
+        "llm_total_tokens": task.llm_total_tokens,
+        "llm_elapsed_ms": task.llm_elapsed_ms,
+        "tool_call_summary": task.tool_call_summary,
+        "task_model_round_count": len(task.task_model_rounds),
         "failure_block_count": failure_block_count,
     }
 
@@ -99,6 +110,8 @@ def _code_file_summary(code_file: CodeFileModel) -> dict:
         "max_severity": max((issue.severity for issue in issues), default=0),
         "issue_types": sorted({issue.type for issue in issues}),
         "failure_block_count": sum(1 for block in code_file.code_blocks if block.failure_message),
+        "main_task_completed": all(block.main_task_completed for block in code_file.code_blocks),
+        "main_task_completion_modes": [block.main_task_completion_mode for block in code_file.code_blocks],
     }
 
 

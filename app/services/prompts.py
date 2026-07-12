@@ -1,16 +1,37 @@
-from app.services.language import language_review_rules
+import json
+from typing import Any
+
+from app.core.config import Settings
+from app.services.rules import review_rules_for
 
 
 BASE_SYSTEM_PROMPT = """你是资深代码审核专家，正在执行 CI 代码审核。
 目标是发现真实、可定位、可修复的问题，避免泛泛而谈。
 你必须兼顾正确性、性能、安全、可读性和代码风格五个维度。
 severity 必须是 1 到 5 的整数，1 表示轻微，5 表示最严重。
+只评论当前目标文件；其他文件及其 diff 只能用于验证上下文，不能成为评论对象。
+增量审核只评论新增或修改后的代码，不评论已删除代码、未修改代码或纯主观风格偏好。
+上下文不足时先调用工具核验，不得把猜测作为 issue 提交。
 """
 
 
 PLAN_OUTPUT_SCHEMA = """只输出 JSON，不要输出 Markdown：
 {
   "comment": "本代码块整体评价",
+  "change_summary": "本次变更的目的和影响范围",
+  "risk_level": "high|medium|low",
+  "checkpoints": [
+    {
+      "focus": "需要核验的具体风险点",
+      "severity": "high|medium|low",
+      "lines": "可能相关的变更后行号",
+      "why": "风险成立时的影响",
+      "rule_id": "命中的规则编号，可为空",
+      "tool_guidance": [
+        {"name": "code_search|read_file|file_read_diff|file_find", "reason": "为何需要上下文", "arguments": {}}
+      ]
+    }
+  ],
   "logic_score": 0-100,
   "performance_score": 0-100,
   "security_score": 0-100,
@@ -20,12 +41,51 @@ PLAN_OUTPUT_SCHEMA = """只输出 JSON，不要输出 Markdown：
 """
 
 
-MAIN_OUTPUT_SCHEMA = """最终必须通过 code_comment 工具提交问题，或通过 task_done 工具声明无问题。
-每个问题必须包含 type、severity、description、suggestion、issue_line_numbers。
+MAIN_OUTPUT_SCHEMA = """最终必须通过 code_comment 工具提交问题，并在审核完成后通过 task_done 工具结束任务。
+每个问题必须包含 type、severity、description、suggestion、issue_line_numbers、existing_code、evidence。
 type 只能使用 logic、performance、security、readability、code_style。
 issue_line_numbers 使用变更后文件中的行号，多个行号用英文逗号分隔。
+existing_code 必须是目标文件或 diff 中可以直接匹配的短代码片段；evidence 说明为什么这是本次变更引入或暴露的真实问题。
+可以额外提供 suggestion_code 表示建议替换后的代码片段。
+优先在一次 code_comment 调用的 comments 数组中批量提交已经确认的问题。提交评论后仍必须调用 task_done(state="DONE")。
 如果当前模型或网关不支持工具调用，则直接输出 JSON：
-{"issues":[{"type":"security","severity":5,"description":"问题描述","suggestion":"修复建议","issue_line_numbers":"12","confidence_level":0.8}]}
+{"issues":[{"type":"security","severity":5,"description":"问题描述","suggestion":"修复建议","issue_line_numbers":"12","existing_code":"strcpy(dst, input);","suggestion_code":"snprintf(dst, sizeof(dst), \"%s\", input);","evidence":"新增行直接使用无边界拷贝","confidence_level":0.8}]}
+"""
+
+
+RELOCATION_OUTPUT_SCHEMA = """只输出 JSON，不要输出 Markdown：
+{
+  "issues": [
+    {
+      "issue_id": 1,
+      "issue_line_numbers": "12",
+      "relocation_status": "unchanged|relocated|failed",
+      "relocation_description": "解释为什么保留、修正或无法定位",
+      "existing_code": "从 diff 中逐字复制的最小连续代码片段",
+      "evidence_match_status": "matched|partial|missing",
+      "evidence_match_score": 0.0-1.0,
+      "confidence_level": 0.0-1.0
+    }
+  ]
+}
+"""
+
+
+FILTER_OUTPUT_SCHEMA = """只输出 JSON，不要输出 Markdown：
+{
+  "decisions": [
+    {
+      "issue_id": 1,
+      "issue_show": true,
+      "filter_status": "kept|filtered",
+      "filter_reason": "保留或过滤的原因",
+      "counter_evidence": "只有过滤时填写：diff 中可直接证伪该 issue 的代码证据",
+      "evidence_match_status": "matched|partial|missing",
+      "evidence_match_score": 0.0-1.0,
+      "confidence_level": 0.0-1.0
+    }
+  ]
+}
 """
 
 
@@ -38,11 +98,10 @@ MAIN_TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"},
-                    "regex": {"type": "boolean", "default": False},
-                    "limit": {"type": "integer", "default": 20},
+                    "query_name": {"type": "string"},
+                    "case_sensitive": {"type": "boolean", "default": False},
                 },
-                "required": ["query"],
+                "required": ["query_name"],
             },
         },
     },
@@ -50,14 +109,13 @@ MAIN_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "file_read_diff",
-            "description": "读取当前审核文件的 diff 内容。",
+            "description": "批量读取当前提交中任意变更文件的 diff，只用于验证当前目标文件的问题。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
-                    "start_line": {"type": "integer"},
-                    "end_line": {"type": "integer"},
+                    "path_array": {"type": "array", "items": {"type": "string"}},
                 },
+                "required": ["path_array"],
             },
         },
     },
@@ -69,11 +127,12 @@ MAIN_TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"},
-                    "regex": {"type": "boolean", "default": False},
-                    "limit": {"type": "integer", "default": 20},
+                    "search_text": {"type": "string"},
+                    "file_patterns": {"type": "array", "items": {"type": "string"}},
+                    "case_sensitive": {"type": "boolean", "default": False},
+                    "use_perl_regexp": {"type": "boolean", "default": False},
                 },
-                "required": ["query"],
+                "required": ["search_text"],
             },
         },
     },
@@ -96,35 +155,32 @@ MAIN_TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "file_read",
-            "description": "read_file 的兼容别名，用于贴近 OCR 工具命名。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "start_line": {"type": "integer"},
-                    "end_line": {"type": "integer"},
-                },
-                "required": ["file_path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "code_comment",
-            "description": "提交一个明确的代码审核问题。",
+            "description": "批量提交已经确认、可定位且有证据的当前文件代码审核问题。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "type": {"type": "string"},
-                    "severity": {"type": "integer", "minimum": 1, "maximum": 5},
-                    "description": {"type": "string"},
-                    "suggestion": {"type": "string"},
-                    "issue_line_numbers": {"type": "string"},
-                    "confidence_level": {"type": "number"},
+                    "comments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["logic", "performance", "security", "readability", "code_style"]},
+                                "severity": {"type": "integer", "minimum": 1, "maximum": 5},
+                                "description": {"type": "string"},
+                                "suggestion": {"type": "string"},
+                                "issue_line_numbers": {"type": "string"},
+                                "existing_code": {"type": "string"},
+                                "suggestion_code": {"type": "string"},
+                                "evidence": {"type": "string"},
+                                "rule_id": {"type": "string"},
+                                "confidence_level": {"type": "number"}
+                            },
+                            "required": ["type", "severity", "description", "suggestion", "issue_line_numbers", "existing_code", "evidence"]
+                        }
+                    }
                 },
-                "required": ["type", "severity", "description", "suggestion", "issue_line_numbers"],
+                "required": ["comments"],
             },
         },
     },
@@ -136,19 +192,44 @@ MAIN_TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "state": {"type": "string", "enum": ["DONE", "FAILED"]},
                     "summary": {"type": "string"},
                 },
+                "required": ["state"],
             },
         },
     },
 ]
 
 
-def build_plan_messages(file_name: str, language: str, diff_lines: list[str], full_code: str) -> list[dict[str, str]]:
+def build_plan_messages(
+    file_name: str,
+    language: str,
+    diff_lines: list[str],
+    full_code: str,
+    change_files_context: str = "",
+    related_files_context: str = "",
+    static_analysis_context: str = "",
+    settings: Settings | None = None,
+) -> list[dict[str, str]]:
     user_content = "\n\n".join(
         [
-            "## 阶段任务指令\n执行 plan_task：先理解代码变更，给出本代码块整体评论和五个维度评分。",
-            f"## 文件与规则上下文\n文件：{file_name}\n语言：{language}\n语言专项规则：{language_review_rules(language)}",
+            (
+                "## 阶段任务指令\n执行 plan_task：理解代码变更，给出结构化风险检查点、建议的上下文工具调用、"
+                "本代码块整体评论和五个维度评分。检查点必须落到本次新增/修改代码，不要把可能性写成已确认问题。"
+            ),
+            f"## 文件与规则上下文\n文件：{file_name}\n语言：{language}\n规则 JSON：{review_rules_for(file_name, language, settings)}",
+            "## 本次提交的其他变更文件\n" + (change_files_context or "（无）"),
+            (
+                "## 确定性相关文件上下文\n"
+                "这些文件由路径、配对关系和显式引用确定。规划时优先核验它们，但只能评论当前目标文件。\n"
+                + (related_files_context or "（未发现确定性相关文件）")
+            ),
+            (
+                "## 独立静态分析证据\n"
+                "这些结果来自独立分析器，只能作为待核验证据；检查数据流和实际代码后再形成评论，不得机械复制。\n"
+                + (static_analysis_context or "（无相关静态分析结果）")
+            ),
             "## 代码变更\n" + "\n".join(diff_lines),
             "## 目标文件完整代码\n" + full_code,
             "## 输出格式强约束\n" + PLAN_OUTPUT_SCHEMA,
@@ -165,13 +246,33 @@ def build_main_messages(
     language: str,
     diff_lines: list[str],
     full_code: str,
-    plan_comment: str,
+    plan_guidance: str,
+    change_files_context: str = "",
+    related_files_context: str = "",
+    static_analysis_context: str = "",
+    settings: Settings | None = None,
 ) -> list[dict[str, str]]:
     user_content = "\n\n".join(
         [
-            "## 阶段任务指令\n执行 main_task：围绕 plan_task 的判断继续审查，必要时使用工具读取上下文。",
-            f"## 文件与规则上下文\n文件：{file_name}\n语言：{language}\n语言专项规则：{language_review_rules(language)}",
-            "## plan_task 结论\n" + plan_comment,
+            (
+                "## 阶段任务指令\n执行 main_task：逐项核验 plan_task 的风险检查点，并独立扫查遗漏风险。"
+                "上下文不足时调用工具；不要重复使用相同参数调用同一只读工具。"
+                "提交 code_comment 前，必须确认 issue_line_numbers 能定位到变更后的新增/修改代码，"
+                "并提供逐字可匹配的 existing_code 和事实 evidence。完成后必须调用 task_done。"
+            ),
+            f"## 文件与规则上下文\n文件：{file_name}\n语言：{language}\n规则 JSON：{review_rules_for(file_name, language, settings)}",
+            "## 本次提交的其他变更文件\n" + (change_files_context or "（无）"),
+            (
+                "## 确定性相关文件上下文\n"
+                "以下候选已由工程逻辑筛选。用它们验证接口、调用方和契约；Issue 仍必须锚定当前文件的变更行。\n"
+                + (related_files_context or "（未发现确定性相关文件）")
+            ),
+            (
+                "## 独立静态分析证据\n"
+                "逐项验证这些 finding。确认属实时可用其 rule_id 和位置增强 evidence；不成立时不要提交。\n"
+                + (static_analysis_context or "（无相关静态分析结果）")
+            ),
+            "## plan_task 结构化结论\n" + plan_guidance,
             "## 代码变更\n" + "\n".join(diff_lines),
             "## 目标文件完整代码\n" + full_code,
             "## 输出格式强约束\n" + MAIN_OUTPUT_SCHEMA,
@@ -181,3 +282,116 @@ def build_main_messages(
         {"role": "system", "content": BASE_SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
+
+
+def build_relocation_messages(
+    file_name: str,
+    language: str,
+    diff_lines: list[str],
+    full_code: str,
+    issues: list[dict[str, Any]],
+    settings: Settings | None = None,
+) -> list[dict[str, str]]:
+    user_content = "\n\n".join(
+        [
+            (
+                "## 阶段任务指令\n执行 RE_LOCATION_TASK：这些 issue 已经通过本地连续代码匹配但定位失败。"
+                "从 diff 中逐字复制能支撑该评论的最小连续新增代码作为 existing_code，并给出变更后行号。"
+                "不得改写代码；无法找到时 relocation_status 必须为 failed。"
+            ),
+            f"## 文件与规则上下文\n文件：{file_name}\n语言：{language}\n规则 JSON：{review_rules_for(file_name, language, settings)}",
+            "## 待校准 issues\n" + json.dumps({"issues": issues}, ensure_ascii=False, indent=2),
+            "## 代码变更\n" + "\n".join(diff_lines),
+            "## 目标文件完整代码\n" + _numbered_full_code(full_code),
+            "## 输出格式强约束\n" + RELOCATION_OUTPUT_SCHEMA,
+        ]
+    )
+    return [
+        {"role": "system", "content": BASE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def build_review_filter_messages(
+    file_name: str,
+    language: str,
+    diff_lines: list[str],
+    full_code: str,
+    issues: list[dict[str, Any]],
+    settings: Settings | None = None,
+) -> list[dict[str, str]]:
+    user_content = "\n\n".join(
+        [
+            (
+                "## 阶段任务指令\n执行 REVIEW_FILTER_TASK：你是反证事实核查器。"
+                "只有当当前 diff 提供直接反证、足以证明 issue 的核心事实错误时才过滤；"
+                "仅仅无法从 diff 验证、需要跨文件或运行时上下文，必须保留。"
+                "过滤时必须在 counter_evidence 中指出直接反证。"
+            ),
+            f"## 文件与规则上下文\n文件：{file_name}\n语言：{language}\n规则 JSON：{review_rules_for(file_name, language, settings)}",
+            "## 待过滤 issues\n" + json.dumps({"issues": issues}, ensure_ascii=False, indent=2),
+            "## 代码变更\n" + "\n".join(diff_lines),
+            "## 目标文件完整代码\n" + _numbered_full_code(full_code),
+            "## 输出格式强约束\n" + FILTER_OUTPUT_SCHEMA,
+        ]
+    )
+    return [
+        {"role": "system", "content": BASE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def build_batch_dedup_messages(comments: list[dict[str, Any]]) -> list[dict[str, str]]:
+    system_content = """你负责合并同一个 full-scan 批次中的近重复审核问题。
+只把描述同一根因、同一严重度、同一证据模式的问题放入同一组；仅仅类别相同不能合并。
+每个输入 id 必须且只能出现一次。单成员组表示保留，多成员组表示保留 members[0] 并关联其余成员。
+只输出 JSON：{"groups":[{"members":["c-0"]},{"members":["c-1","c-3"]}]}。
+"""
+    return [
+        {"role": "system", "content": system_content},
+        {
+            "role": "user",
+            "content": "## 批次 issues\n" + json.dumps(comments, ensure_ascii=False, indent=2),
+        },
+    ]
+
+
+def build_memory_compression_messages(context: str) -> list[dict[str, str]]:
+    system_content = """你负责压缩代码审核工具对话，使 main_task 能继续而不丢失关键推理状态。
+只总结已经出现的事实，不新增问题。输出纯文本并按以下标题组织，空标题可省略：
+### Confirmed Issues
+### Tool Conclusions
+### Completed Checks
+### Pending Checks
+### Current Focus
+保留文件路径、issue 类型/严重度、关键工具结论和仍需核验的假设；不要复制大段代码。
+"""
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": context},
+    ]
+
+
+def build_project_summary_messages(
+    project_stats: dict[str, Any],
+    issues: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    system_content = """你是 full-scan 的项目级高级审核人。
+根据已经完成证据定位和反证过滤的 issue，提炼跨文件根因、最高风险、模块热点和低成本高收益修复项。
+不要新增输入中不存在的问题，不要逐条复述，不要把被过滤或未完成文件视为已审核。
+输出简洁 Markdown，使用以下可选小节：Top Issues、Module Hotspots、Cross-Cutting Concerns、Quick Wins、Coverage Gaps。
+"""
+    user_content = "\n\n".join(
+        [
+            "## 扫描统计\n" + json.dumps(project_stats, ensure_ascii=False, indent=2),
+            "## 已确认 issues\n" + json.dumps(issues, ensure_ascii=False, indent=2),
+        ]
+    )
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def _numbered_full_code(full_code: str) -> str:
+    return "\n".join(f"{index:>6}  {line}" for index, line in enumerate(full_code.splitlines(), start=1))

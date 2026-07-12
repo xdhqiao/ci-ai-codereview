@@ -21,6 +21,22 @@ class ReviewTarget:
     language: str
     code_line_num: int
     add_code_line_num: int
+    change_type: str = "MODIFIED"
+    old_file_name: str = ""
+
+
+@dataclass(frozen=True)
+class ChangedFile:
+    file_name: str
+    change_type: str
+    old_file_name: str = ""
+
+
+@dataclass(frozen=True)
+class ReviewCollection:
+    targets: list[ReviewTarget]
+    diff_map: dict[str, list[str]]
+    changed_files: list[ChangedFile]
 
 
 class CodeDiffService:
@@ -28,6 +44,9 @@ class CodeDiffService:
         self.settings = settings
 
     def compare_directories(self, base_dir: Path, head_dir: Path) -> list[ReviewTarget]:
+        return self.compare_directories_with_context(base_dir, head_dir).targets
+
+    def compare_directories_with_context(self, base_dir: Path, head_dir: Path) -> ReviewCollection:
         base_dir = base_dir.resolve()
         head_dir = head_dir.resolve()
         if not base_dir.exists() or not base_dir.is_dir():
@@ -37,53 +56,117 @@ class CodeDiffService:
 
         base_files = self._collect_files(base_dir)
         head_files = self._collect_files(head_dir)
+        renamed_head_to_base, renamed_base_paths = self._find_exact_renames(base_files, head_files)
         targets: list[ReviewTarget] = []
-        for rel_path in sorted(head_files):
-            head_path = head_files[rel_path]
+        diff_map: dict[str, list[str]] = {}
+        changed_files: list[ChangedFile] = []
+        for rel_path in sorted(set(base_files) | set(head_files)):
+            if rel_path in renamed_base_paths:
+                continue
+            renamed_from = renamed_head_to_base.get(rel_path)
+            if renamed_from is not None:
+                file_name = rel_path.as_posix()
+                old_file_name = renamed_from.as_posix()
+                changed_files.append(
+                    ChangedFile(file_name=file_name, change_type="RENAMED", old_file_name=old_file_name)
+                )
+                diff_map[file_name] = [f"      RENAMED FROM {old_file_name}"]
+                continue
+            head_path = head_files.get(rel_path)
             base_path = base_files.get(rel_path)
-            if base_path and self._md5(base_path) == self._md5(head_path):
+            if base_path and head_path and self._md5(base_path) == self._md5(head_path):
                 continue
 
             base_lines = self._read_text_lines(base_path) if base_path else []
-            head_lines = self._read_text_lines(head_path)
+            head_lines = self._read_text_lines(head_path) if head_path else []
             diff_lines = self.create_diff_lines(base_lines, head_lines)
             if not diff_lines:
                 continue
 
+            file_name = rel_path.as_posix()
+            change_type = "MODIFIED"
+            if base_path is None:
+                change_type = "ADDED"
+            elif head_path is None:
+                change_type = "DELETED"
+            changed_files.append(ChangedFile(file_name=file_name, change_type=change_type))
+            diff_map[file_name] = diff_lines
+
+            # Deleted files remain available through file_read_diff and the
+            # change manifest, but do not create a review subtask of their own.
+            if head_path is None:
+                continue
+
             targets.append(
                 ReviewTarget(
-                    file_name=rel_path.as_posix(),
+                    file_name=file_name,
                     diff_lines=diff_lines,
                     full_code="".join(head_lines),
                     language=detect_language(rel_path.name),
                     code_line_num=len(head_lines),
                     add_code_line_num=sum(1 for line in diff_lines if len(line) > 6 and line[6] == "+"),
+                    change_type=change_type,
                 )
             )
-        return targets
+        return ReviewCollection(targets=targets, diff_map=diff_map, changed_files=changed_files)
+
+    def _find_exact_renames(
+        self,
+        base_files: dict[Path, Path],
+        head_files: dict[Path, Path],
+    ) -> tuple[dict[Path, Path], set[Path]]:
+        base_only = set(base_files) - set(head_files)
+        head_only = set(head_files) - set(base_files)
+        base_by_hash: dict[str, list[Path]] = {}
+        head_by_hash: dict[str, list[Path]] = {}
+        for rel_path in base_only:
+            base_by_hash.setdefault(self._md5(base_files[rel_path]), []).append(rel_path)
+        for rel_path in head_only:
+            head_by_hash.setdefault(self._md5(head_files[rel_path]), []).append(rel_path)
+
+        renamed_head_to_base: dict[Path, Path] = {}
+        renamed_base_paths: set[Path] = set()
+        for digest, old_paths in base_by_hash.items():
+            new_paths = head_by_hash.get(digest) or []
+            if len(old_paths) != 1 or len(new_paths) != 1:
+                continue
+            old_path = old_paths[0]
+            new_path = new_paths[0]
+            renamed_head_to_base[new_path] = old_path
+            renamed_base_paths.add(old_path)
+        return renamed_head_to_base, renamed_base_paths
 
     def scan_directory(self, target_dir: Path) -> list[ReviewTarget]:
+        return self.scan_directory_with_context(target_dir).targets
+
+    def scan_directory_with_context(self, target_dir: Path) -> ReviewCollection:
         target_dir = target_dir.resolve()
         if not target_dir.exists() or not target_dir.is_dir():
             raise FileNotFoundError(f"Review directory does not exist: {target_dir}")
 
         targets: list[ReviewTarget] = []
+        diff_map: dict[str, list[str]] = {}
+        changed_files: list[ChangedFile] = []
         for rel_path, file_path in sorted(self._collect_files(target_dir).items()):
             lines = self._read_text_lines(file_path)
             if not lines:
                 continue
             diff_lines = [self._format_diff_line(index, "+", line.rstrip("\n")) for index, line in enumerate(lines, start=1)]
+            file_name = rel_path.as_posix()
+            diff_map[file_name] = diff_lines
+            changed_files.append(ChangedFile(file_name=file_name, change_type="FULL"))
             targets.append(
                 ReviewTarget(
-                    file_name=rel_path.as_posix(),
+                    file_name=file_name,
                     diff_lines=diff_lines,
                     full_code="".join(lines),
                     language=detect_language(rel_path.name),
                     code_line_num=len(lines),
                     add_code_line_num=len(lines),
+                    change_type="FULL",
                 )
             )
-        return targets
+        return ReviewCollection(targets=targets, diff_map=diff_map, changed_files=changed_files)
 
     def create_diff_lines(self, base_lines: list[str], head_lines: list[str]) -> list[str]:
         matcher = difflib.SequenceMatcher(a=base_lines, b=head_lines, autojunk=False)

@@ -1,0 +1,133 @@
+{
+  "version": "2026-07-11",
+  "default": {
+    "focus": [
+      "correctness",
+      "security",
+      "performance",
+      "readability",
+      "code_style",
+      "test_impact"
+    ],
+    "severity_scale": "1 is minor and 5 is critical. Prefer concrete, reproducible issues.",
+    "output_types": ["logic", "performance", "security", "readability", "code_style"]
+  },
+  "languages": [
+    {
+      "language": "Python",
+      "extensions": [".py"],
+      "focus": [
+        "exception handling and swallowed errors",
+        "path traversal and unsafe file IO",
+        "injection risks from eval, exec, shell, SQL, or template rendering",
+        "FastAPI and MongoEngine lifecycle boundaries",
+        "blocking calls in request paths"
+      ]
+    },
+    {
+      "language": "JavaScript",
+      "extensions": [".js", ".jsx"],
+      "focus": [
+        "async error handling and unhandled promises",
+        "XSS and injection risks",
+        "runtime input validation",
+        "browser and Node compatibility",
+        "bundle-size sensitive dependencies"
+      ]
+    },
+    {
+      "language": "TypeScript",
+      "extensions": [".ts", ".tsx"],
+      "focus": [
+        "type narrowing and accidental any",
+        "runtime validation gaps after compile-time checks",
+        "async flow and React state consistency",
+        "API contract compatibility",
+        "dead code hidden by permissive types"
+      ]
+    },
+    {
+      "language": "Go",
+      "extensions": [".go"],
+      "focus": [
+        "context propagation",
+        "goroutine lifecycle and channel safety",
+        "error wrapping and return-path consistency",
+        "defer ordering and resource release",
+        "data races around shared state"
+      ]
+    },
+    {
+      "language": "C",
+      "extensions": [".c", ".h"],
+      "focus": [
+        "buffer boundaries and unsafe string functions",
+        "null pointer dereference",
+        "integer overflow and signedness conversion",
+        "format-string vulnerabilities",
+        "resource release on every error path",
+        "undefined behavior"
+      ],
+      "dangerous_apis": ["strcpy", "strcat", "sprintf", "gets", "sscanf", "printf"]
+    },
+    {
+      "language": "C++",
+      "extensions": [".cpp", ".cc", ".hpp"],
+      "focus": [
+        "RAII and ownership lifetime",
+        "bounds checks and iterator invalidation",
+        "exception safety",
+        "thread-safety around shared state",
+        "undefined behavior"
+      ]
+    },
+    {
+      "language": "Java",
+      "extensions": [".java"],
+      "focus": [
+        "nullability",
+        "transaction boundaries",
+        "thread-safety",
+        "exception layering",
+        "collection and stream performance",
+        "unsafe deserialization or input handling"
+      ]
+    },
+    {
+      "language": "SQL",
+      "extensions": [".sql"],
+      "focus": [
+        "injection risk",
+        "index usage",
+        "lock scope",
+        "transaction isolation",
+        "pagination and large-result performance"
+      ]
+    },
+    {
+      "language": "Shell",
+      "extensions": [".sh", ".bash", ".ps1"],
+      "focus": [
+        "quoting and path spaces",
+        "command injection",
+        "set -e and pipeline behavior",
+        "portability",
+        "idempotency"
+      ]
+    }
+  ],
+  "path_rules": [
+    {
+      "pattern": "tests/",
+      "focus": ["assertion strength", "fixture isolation", "deterministic execution"]
+    },
+    {
+      "pattern": "routes/",
+      "focus": ["input validation", "error mapping", "service-layer delegation"]
+    },
+    {
+      "pattern": "services/",
+      "focus": ["business invariants", "retry behavior", "external-call timeouts"]
+    }
+  ]
+}

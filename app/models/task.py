@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
-from mongoengine import DateTimeField, DictField, Document, IntField, StringField
+from mongoengine import DateTimeField, DictField, Document, EmbeddedDocumentField, IntField, ListField, StringField
+
+from app.models.code_file import ModelRoundTrace
 
 
 def utc_now() -> datetime:
@@ -29,9 +31,23 @@ class TaskModel(Document):
     code_block_num = IntField(required=False, default=0)
     file_num = IntField(required=False, default=0)
     reviewed_file_num = IntField(required=False, default=0)
+    resumed_file_num = IntField(required=False, default=0)
+    skipped_file_num = IntField(required=False, default=0)
+    incomplete_file_num = IntField(required=False, default=0)
+    completion_status = StringField(required=False, default="")
     add_code_line_num = IntField(required=False, default=0)
     comment_line_number = IntField(required=False, default=0)
     process_time = IntField(required=False, default=0)
+    estimated_token_num = IntField(required=False, default=0)
+    consumed_estimated_token_num = IntField(required=False, default=0)
+    token_budget_num = IntField(required=False, default=0)
+    llm_prompt_tokens = IntField(required=False, default=0)
+    llm_completion_tokens = IntField(required=False, default=0)
+    llm_total_tokens = IntField(required=False, default=0)
+    llm_elapsed_ms = IntField(required=False, default=0)
+    tool_call_summary = DictField(required=False, default=dict)
+    task_model_rounds = ListField(EmbeddedDocumentField(ModelRoundTrace), required=False, default=list)
+    project_summary = StringField(required=False, default="")
     parent_path = StringField(required=False)
     developer_issue_summary = DictField(required=False, default=dict)
     created_by = StringField(required=False, default="")
