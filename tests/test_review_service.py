@@ -34,7 +34,7 @@ class FakeRetryLLMClient:
             return {
                 "role": "assistant",
                 "content": (
-                    '{"decisions":[{"issue_id":1,"issue_show":true,'
+                    '{"decisions":[{"issue_id":1,'
                     '"filter_status":"kept","filter_reason":"not disproved"}]}'
                 ),
             }
@@ -70,7 +70,7 @@ class FakeToolTraceLLMClient:
             return {
                 "role": "assistant",
                 "content": (
-                    '{"decisions":[{"issue_id":1,"issue_show":true,'
+                    '{"decisions":[{"issue_id":1,'
                     '"filter_status":"kept","filter_reason":"valid","confidence_level":0.9}]}'
                 ),
                 "_llm_trace": {
@@ -168,7 +168,7 @@ class FakeCompressionLLMClient:
             return {
                 "role": "assistant",
                 "content": (
-                    '{"decisions":[{"issue_id":1,"issue_show":true,'
+                    '{"decisions":[{"issue_id":1,'
                     '"filter_status":"kept","filter_reason":"not disproved"}]}'
                 ),
             }
@@ -264,6 +264,8 @@ def test_incremental_review_saves_code_file_and_issues(tmp_path: Path):
 
     code_file = CodeFileModel.objects(task_id=str(task.id)).first()
     assert code_file.file_name == "src/app.py"
+    assert code_file.code_blocks[0].block_id == 0
+    assert code_file.code_blocks[0].issues[0].issue_id == 0
     assert code_file.code_blocks[0].contents[0][6] in {" ", "-", "+"}
     assert any(line[6] == "+" for line in code_file.code_blocks[0].contents)
     assert max(issue.severity for issue in code_file.code_blocks[0].issues) == 5
@@ -288,6 +290,7 @@ def test_full_scan_reviews_all_lines(tmp_path: Path):
     code_file = CodeFileModel.objects(task_id=str(task.id)).first()
     assert code_file.file_name == "script.py"
     assert code_file.add_code_line_num == 1
+    assert code_file.code_blocks[0].block_id == 0
 
 
 def test_version_names_resolve_under_repository_root(tmp_path: Path):
@@ -404,7 +407,6 @@ def test_semantic_duplicate_issues_merge_only_with_same_line_and_evidence():
         issue_line_numbers="12",
         existing_code="strcpy(dst, src);",
         evidence="no destination size",
-        issue_show=True,
     )
     duplicate = Issue(
         issue_id=2,
@@ -415,7 +417,6 @@ def test_semantic_duplicate_issues_merge_only_with_same_line_and_evidence():
         issue_line_numbers="12",
         existing_code="strcpy(dst, src);",
         evidence="the copy is unbounded",
-        issue_show=True,
     )
     different_location = Issue(
         issue_id=3,
@@ -426,7 +427,6 @@ def test_semantic_duplicate_issues_merge_only_with_same_line_and_evidence():
         issue_line_numbers="30",
         existing_code="strcpy(dst, src);",
         evidence="a separate copy is unbounded",
-        issue_show=True,
     )
     block = CodeBlock(block_id=1, contents=[], issues=[first, duplicate, different_location])
 
@@ -546,7 +546,7 @@ def test_deletion_only_regression_anchors_to_affected_surviving_line():
 
     assert relocation_failure == ""
     assert filter_failure == ""
-    assert filtered[0].issue_show is True
+    assert filtered[0].filter_status == "kept"
     assert filtered[0].relocation_status == "unchanged"
     assert filtered[0].evidence_source == "diff_deletion_anchor"
     assert filtered[0].issue_line_numbers == "2"
@@ -584,7 +584,7 @@ def test_deletion_anchor_does_not_make_unrelated_context_reviewable():
     relocated, _, _ = service._run_relocation_task(target, diff_lines, [issue])
 
     assert relocated[0].relocation_status == "failed"
-    assert relocated[0].issue_show is True
+    assert relocated[0].filter_status == ""
 
 
 def test_local_review_filter_hides_low_confidence_issue():
@@ -615,7 +615,6 @@ def test_local_review_filter_hides_low_confidence_issue():
     )
 
     assert failure == ""
-    assert issues[0].issue_show is False
     assert issues[0].filter_status == "filtered"
     assert "置信度" in issues[0].filter_reason
     assert traces[0].stage == "review_filter_task"
@@ -654,7 +653,7 @@ def test_local_review_filter_hides_mismatched_existing_code():
         [issue],
     )
 
-    assert issues[0].issue_show is False
+    assert issues[0].filter_status == "filtered"
     assert issues[0].evidence_match_status == "missing"
     assert "existing_code" in issues[0].filter_reason
 
@@ -949,7 +948,6 @@ def test_full_scan_batch_dedup_groups_without_hiding_file_occurrences(tmp_path: 
     assert reviewed_task.comment_line_number == 2
     code_files = list(CodeFileModel.objects(task_id=str(task.id)).order_by("file_name"))
     all_issues = [issue for code_file in code_files for block in code_file.code_blocks for issue in block.issues]
-    assert all(issue.issue_show is not False for issue in all_issues)
     assert len({issue.duplicate_group_id for issue in all_issues}) == 1
     assert all(issue.filter_status != "filtered" for issue in all_issues)
     assert sum(1 for issue in all_issues if issue.duplicate_of) == 1
@@ -1040,7 +1038,6 @@ def test_filter_cannot_remove_issue_without_diff_counter_evidence():
         issue_line_numbers="1",
         existing_code="return value;",
         evidence="the new return bypasses validation",
-        issue_show=True,
     )
 
     service._apply_filter_response(
@@ -1049,7 +1046,6 @@ def test_filter_cannot_remove_issue_without_diff_counter_evidence():
             "decisions": [
                 {
                     "issue_id": 1,
-                    "issue_show": False,
                     "filter_status": "filtered",
                     "filter_reason": "uncertain",
                 }
@@ -1057,7 +1053,6 @@ def test_filter_cannot_remove_issue_without_diff_counter_evidence():
         },
     )
 
-    assert issue.issue_show is True
     assert issue.filter_status == "kept"
     assert "直接反证" in issue.filter_reason
 
@@ -1238,7 +1233,6 @@ def test_semantic_batch_dedup_is_strict_and_persists_task_trace():
             existing_code="strcpy(dst, src);",
             evidence="the destination bound is unavailable",
             rule_id="c-buffer-boundary",
-            issue_show=True,
         )
         return CodeFileModel(
             task_id=str(task.id),
@@ -1260,8 +1254,8 @@ def test_semantic_batch_dedup_is_strict_and_persists_task_trace():
     duplicate_count = service._semantic_batch_deduplicate(task, code_files, batch_index=1)
 
     assert duplicate_count == 1
-    assert code_files[0].code_blocks[0].issues[0].issue_show is True
-    assert code_files[1].code_blocks[0].issues[0].issue_show is True
+    assert code_files[0].code_blocks[0].issues[0].filter_status == ""
+    assert code_files[1].code_blocks[0].issues[0].filter_status == ""
     assert code_files[1].code_blocks[0].issues[0].duplicate_of.startswith("a.c#block1")
     assert code_files[1].code_blocks[0].issues[0].filter_status == ""
     assert service.task_model_rounds[0].stage == "batch_dedup_task_1"
@@ -1362,7 +1356,6 @@ def test_full_scan_llm_project_summary_and_task_usage_are_persisted():
             issue_line_numbers="1",
             existing_code="strcpy(dst, src);",
             evidence="the destination bound is unavailable",
-            issue_show=True,
         )
         code_files.append(
             CodeFileModel(

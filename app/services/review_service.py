@@ -399,7 +399,7 @@ class ReviewTaskService:
                 continue
             for block in code_file.code_blocks:
                 for issue_index, issue in enumerate(block.issues):
-                    if issue.issue_show is False:
+                    if not self._is_reportable_issue(issue):
                         continue
                     key = self._batch_issue_key(issue)
                     if key not in seen:
@@ -468,7 +468,7 @@ class ReviewTaskService:
         for code_file in code_files:
             for block in code_file.code_blocks:
                 for issue in block.issues:
-                    if issue.issue_show is False:
+                    if not self._is_reportable_issue(issue):
                         continue
                     issue_ref = f"c-{len(payload)}"
                     references[issue_ref] = (code_file, block, issue)
@@ -627,7 +627,7 @@ class ReviewTaskService:
         related_files = self._related_files(target)
         related_files_context = self._related_files_context(related_files)
         code_blocks: list[CodeBlock] = []
-        for block_index, block_lines in enumerate(self.diff_service.split_code_blocks(target.diff_lines), start=1):
+        for block_index, block_lines in enumerate(self.diff_service.split_code_blocks(target.diff_lines)):
             block_started_at = time.monotonic()
             static_findings = self._static_findings_for_block(target.file_name, block_lines)
             static_analysis_context = self._static_analysis_context(static_findings)
@@ -1297,7 +1297,6 @@ class ReviewTaskService:
         if not self.settings.review_filter_enabled:
             for issue in issues:
                 issue.filter_status = "skipped"
-                issue.issue_show = True
             return issues, [], ""
 
         local_started_at = time.monotonic()
@@ -1311,7 +1310,7 @@ class ReviewTaskService:
                 int((time.monotonic() - local_started_at) * 1000),
             )
         ]
-        candidates = [issue for issue in issues if issue.issue_show is not False]
+        candidates = [issue for issue in issues if self._is_reportable_issue(issue)]
         if self.llm_client.is_mock or not candidates:
             return issues, model_rounds, ""
 
@@ -1576,15 +1575,14 @@ class ReviewTaskService:
             issue = issue_by_id.get(self._safe_int(item.get("issue_id")))
             if not issue:
                 continue
-            requested_show = bool(item.get("issue_show", True))
+            requested_status = str(item.get("filter_status") or "kept").lower()
+            requested_filtered = requested_status == "filtered"
             counter_evidence = str(item.get("counter_evidence") or "").strip()
-            if not requested_show and not counter_evidence:
-                issue.issue_show = True
+            if requested_filtered and not counter_evidence:
                 issue.filter_status = "kept"
                 issue.filter_reason = "过滤结论缺少 diff 直接反证，按保守原则保留。"
             else:
-                issue.issue_show = requested_show
-                issue.filter_status = str(item.get("filter_status") or ("kept" if issue.issue_show else "filtered"))
+                issue.filter_status = requested_status if requested_status in {"kept", "filtered"} else "kept"
                 issue.filter_reason = str(item.get("filter_reason") or "")
             issue.filter_counter_evidence = counter_evidence
             issue.evidence_match_status = str(item.get("evidence_match_status") or issue.evidence_match_status or "")
@@ -1592,7 +1590,7 @@ class ReviewTaskService:
                 issue.evidence_match_score = self._confidence(item.get("evidence_match_score"), issue.evidence_match_score)
             if item.get("confidence_level") is not None:
                 issue.confidence_level = self._confidence(item.get("confidence_level"), issue.confidence_level)
-            issue.re_review_status = 0 if issue.issue_show else 1
+            issue.re_review_status = 0 if self._is_reportable_issue(issue) else 1
             issue.re_review_description = issue.filter_reason
 
     def _relocate_issues_locally(
@@ -1663,7 +1661,7 @@ class ReviewTaskService:
         for issue in issues:
             if only_unresolved and issue.filter_status:
                 continue
-            was_semantically_filtered = issue.issue_show is False and issue.filter_status == "filtered"
+            was_semantically_filtered = issue.filter_status == "filtered"
             reason = ""
             confidence = issue.confidence_level if issue.confidence_level is not None else 0.8
             line_numbers = self._parse_line_numbers(issue.issue_line_numbers)
@@ -1697,18 +1695,15 @@ class ReviewTaskService:
                 reason = "issue 行号不在本次新增/变更行或删除块相邻存活行中。"
 
             if reason:
-                issue.issue_show = False
                 issue.filter_status = "filtered"
                 issue.filter_reason = reason
             elif preserve_existing_filtered and was_semantically_filtered:
-                issue.issue_show = False
                 issue.filter_status = "filtered"
                 issue.filter_reason = issue.filter_reason or "REVIEW_FILTER_TASK 提供了 diff 直接反证。"
             else:
-                issue.issue_show = True
                 issue.filter_status = "kept"
                 issue.filter_reason = "问题通过机械证据校验，且未被 diff 直接证伪。"
-            issue.re_review_status = 0 if issue.issue_show else 1
+            issue.re_review_status = 0 if self._is_reportable_issue(issue) else 1
             issue.re_review_description = issue.filter_reason
 
     def _apply_evidence_match(self, issue: Issue, match: EvidenceMatch) -> None:
@@ -1812,7 +1807,6 @@ class ReviewTaskService:
     def _issue_filter_payload(self, issue: Issue) -> dict[str, Any]:
         return {
             "issue_id": issue.issue_id,
-            "issue_show": issue.issue_show,
             "filter_status": issue.filter_status,
             "filter_reason": issue.filter_reason,
             "evidence_match_status": issue.evidence_match_status,
@@ -1833,16 +1827,19 @@ class ReviewTaskService:
 
     def _reindex_issues(self, issues: list[Issue]) -> None:
         visible_index = 1
-        for index, issue in enumerate(issues, start=1):
+        for index, issue in enumerate(issues):
             issue.issue_id = index
-            if issue.issue_show is False:
+            if not self._is_reportable_issue(issue):
                 issue.comment_line_number = 0
                 continue
             issue.comment_line_number = visible_index
             visible_index += 1
 
     def _visible_issue_count(self, issues: list[Issue]) -> int:
-        return sum(1 for issue in issues if issue.issue_show is not False)
+        return sum(1 for issue in issues if self._is_reportable_issue(issue))
+
+    def _is_reportable_issue(self, issue: Issue) -> bool:
+        return (issue.filter_status or "").lower() != "filtered"
 
     def _confidence(self, value: Any, default: float | None = None) -> float | None:
         try:
@@ -1869,7 +1866,7 @@ class ReviewTaskService:
         for code_file in code_files:
             for block in code_file.code_blocks:
                 for issue in block.issues:
-                    if issue.issue_show is False:
+                    if not self._is_reportable_issue(issue):
                         continue
                     issue_summary[issue.type or "general"] = issue_summary.get(issue.type or "general", 0) + 1
                     severity_key = str(issue.severity or 0)
@@ -1940,7 +1937,7 @@ class ReviewTaskService:
                     source = str(finding.get("analyzer") or "unknown")
                     static_sources[source] = static_sources.get(source, 0) + 1
                 static_corroborated_issue_count += sum(
-                    1 for issue in block.issues if issue.issue_show is not False and issue.static_corroborated
+                    1 for issue in block.issues if self._is_reportable_issue(issue) and issue.static_corroborated
                 )
         task.developer_issue_summary = {
             **issue_summary,
@@ -2042,7 +2039,7 @@ class ReviewTaskService:
         for code_file in code_files:
             for block in code_file.code_blocks:
                 for issue in block.issues:
-                    if issue.issue_show is False:
+                    if not self._is_reportable_issue(issue):
                         continue
                     issue_payloads.append(
                         {
@@ -2232,7 +2229,6 @@ class ReviewTaskService:
                     suggestion_code=str(comment.get("suggestion_code") or ""),
                     evidence=str(comment.get("evidence") or ""),
                     rule_id=str(comment.get("rule_id") or ""),
-                    issue_show=True,
                     comment_line_number=index,
                     confidence_level=self._confidence(comment.get("confidence_level")),
                     original_issue_line_numbers=str(comment.get("issue_line_numbers") or ""),
@@ -2410,7 +2406,7 @@ class ReviewTaskService:
                 if duplicate_target is not None:
                     previous_list, previous_index = duplicate_target
                     previous_issue = previous_list[previous_index]
-                    if previous_issue.issue_show is False and issue.issue_show is not False:
+                    if not self._is_reportable_issue(previous_issue) and self._is_reportable_issue(issue):
                         previous_list[previous_index] = issue
                     continue
                 seen_indexes[key] = (merged_issues, len(merged_issues))
@@ -2488,12 +2484,23 @@ class ReviewTaskService:
     def _average_block_scores(self, blocks: list[CodeBlock]) -> dict[str, int]:
         if not blocks:
             return {field: 0 for field in SCORE_FIELDS}
-        return {field: int(sum(getattr(block, field) for block in blocks) / len(blocks)) for field in SCORE_FIELDS}
+        weights = [self._block_change_weight(block) for block in blocks]
+        total_weight = sum(weights)
+        return {
+            field: round(sum(getattr(block, field) * weight for block, weight in zip(blocks, weights)) / total_weight)
+            for field in SCORE_FIELDS
+        }
 
     def _average_file_scores(self, code_files: list[CodeFileModel]) -> dict[str, int]:
         if not code_files:
             return {field: 0 for field in SCORE_FIELDS}
-        return {field: int(sum(getattr(code_file, field) for code_file in code_files) / len(code_files)) for field in SCORE_FIELDS}
+        blocks = [block for code_file in code_files for block in code_file.code_blocks]
+        return self._average_block_scores(blocks)
+
+    def _block_change_weight(self, block: CodeBlock) -> int:
+        lines = list(block.contents or [])
+        changed_line_count = sum(1 for line in lines if len(line) > 6 and line[6] in {"+", "-"})
+        return max(1, changed_line_count) if lines else 0
 
     def _iter_added_code(self, diff_lines: list[str]):
         for _, code in self._iter_added_with_line_number(diff_lines):

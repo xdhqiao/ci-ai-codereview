@@ -127,7 +127,7 @@ SARIF 佐证：匹配当前文件、变更行和问题语义。
 本地有效性门禁：检查字段、行号、置信度和变更行重叠。
 REVIEW_FILTER_TASK：只有 diff 存在直接反证时才允许过滤。
 文件内去重：相同位置、类型、严重度和证据的问题合并。
-被反证过滤的问题不会删除，而是保存为 issue_show=false，保留审核和反馈依据。批次重复问题只写入分组字段，不修改 issue_show；不同文件中的每个 occurrence 都独立保留。
+被反证过滤的问题不会删除，而是通过 `filter_status=filtered` 保存过滤结论和依据。`issue_show` 是备用字段，不参与当前审核、统计或展示逻辑。批次重复问题只写入分组字段；不同文件中的每个 occurrence 都独立保留。
 十五、SARIF 静态证据
 可通过 REVIEW_STATIC_ANALYSIS_SARIF_PATHS 加载 CodeQL、Semgrep、clang-tidy 等 SARIF 2.1.0 报告。
 只接受仓库内部报告，并限制文件大小和 finding 数。只有与当前 CodeBlock 变更行重叠的 finding 会进入 prompt。

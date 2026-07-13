@@ -78,7 +78,6 @@ FILTER_OUTPUT_SCHEMA = """只输出 JSON，不要输出 Markdown：
   "decisions": [
     {
       "issue_id": 1,
-      "issue_show": true,
       "filter_status": "kept|filtered",
       "filter_reason": "保留或过滤的原因",
       "counter_evidence": "只有过滤时填写：diff 中可直接证伪该 issue 的代码证据",

@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.core.config import get_settings
 from app.core.database import connect_to_mongo, disconnect_mongo
 from app.core.exceptions import register_exception_handlers
-from app.routes import code_files, health, tasks
+from app.routes import code_files, health, reports, tasks
 from app.services.scheduler import ReviewScheduler
 
 
@@ -30,6 +32,8 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(tasks.router)
     app.include_router(code_files.router)
+    app.include_router(reports.router)
+    app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "static"), name="static")
     return app
 
 

@@ -24,7 +24,6 @@ class IssueResponse(BaseModel):
     evidence_source: str
     location_confidence: float | None
     location_ambiguous: bool
-    issue_show: bool | None
     comment_line_number: int
     confidence_level: float | None
     original_issue_line_numbers: str
@@ -61,7 +60,6 @@ class IssueResponse(BaseModel):
             evidence_source=issue.evidence_source or "",
             location_confidence=issue.location_confidence,
             location_ambiguous=bool(issue.location_ambiguous),
-            issue_show=issue.issue_show,
             comment_line_number=issue.comment_line_number or 0,
             confidence_level=issue.confidence_level,
             original_issue_line_numbers=issue.original_issue_line_numbers or "",

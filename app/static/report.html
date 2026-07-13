@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>代码审核报告</title>
+  <link rel="stylesheet" href="/static/report.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div>
+        <p class="eyebrow">CODE REVIEW REPORT</p>
+        <h1 id="project-title">代码审核报告</h1>
+      </div>
+      <span id="task-state" class="status">加载中</span>
+    </div>
+  </header>
+
+  <main class="shell" id="report-root" aria-live="polite" hidden>
+    <section class="overview-band" aria-labelledby="overview-title">
+      <h2 id="overview-title" class="section-title">审核概览</h2>
+      <div class="overview-grid" id="overview-grid"></div>
+    </section>
+
+    <section class="score-band" aria-labelledby="score-title">
+      <div class="score-summary">
+        <p class="eyebrow">QUALITY SCORE</p>
+        <div class="score-number"><strong id="overall-score">--</strong><span>/ 100</span></div>
+        <p id="change-summary" class="muted"></p>
+      </div>
+      <div class="radar-wrap">
+        <canvas id="score-radar" width="420" height="300" aria-label="五维度评分雷达图"></canvas>
+      </div>
+      <div class="dimension-list" id="dimension-list"></div>
+    </section>
+
+    <section class="metric-band" aria-labelledby="metric-title">
+      <h2 id="metric-title" class="section-title">审核数据</h2>
+      <div class="metric-grid" id="metric-grid"></div>
+    </section>
+
+    <section class="issues-band" aria-labelledby="critical-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">TOP SEVERITY</p>
+          <h2 id="critical-title" class="section-title">严重问题</h2>
+        </div>
+        <label id="author-control" class="author-control" hidden>
+          <span>负责人</span>
+          <select id="author-select"></select>
+        </label>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>NO</th><th>文件名</th><th>严重度</th><th>行号</th><th>类型</th><th>问题描述</th><th>修复建议</th></tr>
+          </thead>
+          <tbody id="critical-issues"></tbody>
+        </table>
+      </div>
+      <p id="critical-empty" class="empty" hidden>当前范围内没有审核问题。</p>
+    </section>
+
+    <nav class="pagination" id="pagination-top" aria-label="文件列表顶部分页" hidden></nav>
+
+    <section class="files-band" aria-labelledby="files-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">FILES</p>
+          <h2 id="files-title" class="section-title">文件审核详情</h2>
+        </div>
+        <span id="file-range" class="muted"></span>
+      </div>
+      <div id="file-list"></div>
+    </section>
+
+    <nav class="pagination" id="pagination-bottom" aria-label="文件列表底部分页" hidden></nav>
+  </main>
+
+  <div id="loading" class="loading">正在读取审核结果...</div>
+  <div id="error-state" class="error-state" hidden>
+    <strong>报告加载失败</strong>
+    <p id="error-message"></p>
+    <button id="retry-button" type="button">重新加载</button>
+  </div>
+
+  <dialog id="reject-dialog">
+    <form id="reject-form" method="dialog">
+      <div class="dialog-heading">
+        <div><p class="eyebrow">FEEDBACK</p><h2>说明反对原因</h2></div>
+        <button class="icon-button" id="reject-close" type="button" aria-label="关闭">×</button>
+      </div>
+      <textarea id="reject-reason" rows="6" maxlength="4000" required placeholder="请填写误报原因或补充上下文"></textarea>
+      <div class="dialog-actions">
+        <button type="button" class="button-secondary" id="reject-cancel">取消</button>
+        <button type="submit" class="button-danger">提交反对</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/static/report.js" defer></script>
+</body>
+</html>

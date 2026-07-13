@@ -113,7 +113,7 @@ def _code_file_summary(code_file: CodeFileModel) -> dict:
         "issue_count": len(issues),
         "max_severity": max((issue.severity for issue in issues), default=0),
         "issue_types": sorted({issue.type for issue in issues}),
-        "hidden_issue_count": sum(1 for issue in issues if issue.issue_show is False),
+        "filtered_issue_count": sum(1 for issue in issues if issue.filter_status == "filtered"),
         "duplicate_group_count": len({issue.duplicate_group_id for issue in issues if issue.duplicate_group_id}),
         "tool_names": sorted(set(tool_names)),
         "semantic_tool_call_count": sum(1 for name in tool_names if name in semantic_tool_names),
