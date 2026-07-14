@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import Settings
+from app.services.exclusions import ReviewPathExcluder
 from app.services.language import detect_language
 
 
@@ -40,8 +41,12 @@ class ReviewCollection:
 
 
 class CodeDiffService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, project_exclude_paths: list[str] | None = None) -> None:
         self.settings = settings
+        self.path_excluder = ReviewPathExcluder(settings, project_exclude_paths)
+
+    def set_project_exclude_paths(self, project_exclude_paths: list[str] | None) -> None:
+        self.path_excluder = ReviewPathExcluder(self.settings, project_exclude_paths)
 
     def compare_directories(self, base_dir: Path, head_dir: Path) -> list[ReviewTarget]:
         return self.compare_directories_with_context(base_dir, head_dir).targets
@@ -263,7 +268,7 @@ class CodeDiffService:
         return files
 
     def _is_excluded(self, rel_path: Path) -> bool:
-        return any(part in self.settings.excluded_dir_set for part in rel_path.parts)
+        return self.path_excluder.is_excluded(rel_path)
 
     def _is_allowed(self, path: Path) -> bool:
         return path.suffix.lower() in self.settings.allowed_extension_set

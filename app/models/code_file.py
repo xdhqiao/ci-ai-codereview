@@ -37,7 +37,7 @@ class Issue(EmbeddedDocument):
     evidence_source = StringField(required=False, default="")
     location_confidence = FloatField(required=False)
     location_ambiguous = BooleanField(required=False, default=False)
-    issue_show = BooleanField(required=False, default=True)
+    issue_show = BooleanField(required=False)
     comment_line_number = IntField(required=False, default=0)
     confidence_level = FloatField(required=False)
     original_issue_line_numbers = StringField(required=False, default="")
@@ -94,6 +94,7 @@ class ToolCallTrace(EmbeddedDocument):
 class CodeBlock(EmbeddedDocument):
     block_id = IntField(required=True, default=0)
     block_hash = StringField(required=False)
+    review_fingerprint = StringField(required=False, default="")
     contents = ListField(StringField(), required=True)
     comment = StringField(required=True, default="")
     plan_change_summary = StringField(required=False, default="")
@@ -123,12 +124,21 @@ class CodeBlock(EmbeddedDocument):
     tool_calls = ListField(EmbeddedDocumentField(ToolCallTrace), required=False, default=list)
     gitlab_comment_id = StringField(required=False)
     failure_message = StringField(required=False, default="")
+    review_state = IntField(required=False, default=0)
+    review_attempt_count = IntField(required=False, default=0)
+    update_time = DateTimeField(required=False)
 
 
 class CodeFileModel(Document):
     meta = {
         "collection": "ai_codereview_code_file",
-        "indexes": ["project_id", ("project_id", "review_version", "copy_from_version"), "task_type"],
+        "indexes": [
+            "project_id",
+            ("project_id", "review_version", "copy_from_version"),
+            "task_type",
+            ("task_id", "file_name"),
+            ("task_id", "state"),
+        ],
     }
 
     task_id = StringField(required=False)
@@ -137,6 +147,10 @@ class CodeFileModel(Document):
     copy_from_version = StringField(required=True)
     task_type = IntField(required=False)
     file_name = StringField(required=True)
+    state = IntField(required=False, default=0)
+    source_hash = StringField(required=False, default="")
+    review_fingerprint = StringField(required=False, default="")
+    trigger_revision = IntField(required=False, default=0)
     background = StringField(required=False, default="")
     background_source = StringField(required=False, default="")
     code_blocks = ListField(EmbeddedDocumentField(CodeBlock), default=list)
@@ -151,5 +165,6 @@ class CodeFileModel(Document):
     file_author = StringField(required=False, default="")
     created_by = StringField(required=False, default="")
     create_time = DateTimeField(default=utc_now, required=True)
+    update_time = DateTimeField(required=False)
 
     extra = DictField(required=False, default=dict)

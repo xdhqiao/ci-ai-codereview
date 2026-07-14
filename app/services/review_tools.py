@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings
+from app.services.exclusions import ReviewPathExcluder
 from app.services.semantic_index import SemanticIndex
 
 
@@ -20,9 +21,11 @@ class ReviewToolRunner:
         current_diff_lines: list[str] | None = None,
         diff_map: dict[str, list[str]] | None = None,
         semantic_index: SemanticIndex | None = None,
+        project_exclude_paths: list[str] | None = None,
     ) -> None:
         self.root_dir = root_dir.resolve()
         self.settings = settings
+        self.path_excluder = ReviewPathExcluder(settings, project_exclude_paths)
         self.current_file_name = current_file_name
         self.current_diff_lines = current_diff_lines or []
         self.diff_map = {self._normalize_repo_path(path): list(lines) for path, lines in (diff_map or {}).items()}
@@ -274,7 +277,7 @@ class ReviewToolRunner:
 
     def _is_excluded(self, path: Path) -> bool:
         rel_path = path.relative_to(self.root_dir)
-        return any(part in self.settings.excluded_dir_set for part in rel_path.parts)
+        return self.path_excluder.is_excluded(rel_path)
 
     def _normalize_severity(self, value: Any) -> int:
         if isinstance(value, str):

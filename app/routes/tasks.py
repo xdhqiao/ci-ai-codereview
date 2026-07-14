@@ -2,8 +2,9 @@ from fastapi import APIRouter, Query, status
 
 from app.core.exceptions import NotFoundError
 from app.models.task import TaskModel
-from app.schemas.task import TaskCreate, TaskListResponse, TaskResponse
+from app.schemas.task import JenkinsTaskTrigger, TaskCreate, TaskListResponse, TaskResponse
 from app.services.review_service import ReviewTaskService
+from app.services.task_submission import TaskSubmissionService
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -14,6 +15,8 @@ def create_task(payload: TaskCreate) -> TaskResponse:
         project_id=payload.project_id,
         review_version=payload.review_version,
         copy_from_version=payload.copy_from_version,
+        review_version_path=payload.review_version_path,
+        copy_from_version_path=payload.copy_from_version_path,
         task_type=payload.task_type,
         state=payload.state,
         submitter=payload.submitter,
@@ -21,6 +24,12 @@ def create_task(payload: TaskCreate) -> TaskResponse:
         created_by=payload.created_by,
     )
     task.save()
+    return TaskResponse.from_model(task)
+
+
+@router.post("/trigger", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
+def trigger_task(payload: JenkinsTaskTrigger) -> TaskResponse:
+    task = TaskSubmissionService().trigger(**payload.model_dump())
     return TaskResponse.from_model(task)
 
 

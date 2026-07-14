@@ -15,6 +15,10 @@ class NotFoundError(AppError):
         super().__init__(message=message, status_code=404, code="not_found")
 
 
+class ReviewInterruptedError(Exception):
+    """Internal cooperative cancellation used for scheduler preemption and retriggering."""
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:

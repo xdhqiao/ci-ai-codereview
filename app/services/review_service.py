@@ -8,11 +8,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from typing import Any
 
 from app.core.config import Settings, get_settings
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, ReviewInterruptedError
 from app.models.code_file import CodeBlock, CodeFileModel, Issue, ModelRoundTrace, ToolCallTrace
 from app.models.task import TaskModel
 from app.services.background import FileBackgroundProvider, FileReviewBackground, MockFileBackgroundProvider
@@ -24,7 +24,9 @@ from app.services.diff_service import (
     ReviewTarget,
 )
 from app.services.evidence import CodeEvidenceLocator, EvidenceMatch
+from app.services.exclusions import project_exclude_paths
 from app.services.llm_client import LLMClient
+from app.services.notification import ReviewNotificationService
 from app.services.prompts import (
     MAIN_TOOL_DEFINITIONS,
     build_batch_dedup_messages,
@@ -40,6 +42,7 @@ from app.services.related_files import RelatedFile, RelatedFileResolver
 from app.services.rules import review_rules_for
 from app.services.semantic_index import SemanticIndex
 from app.services.static_analysis import SarifFindingLoader, StaticFinding
+from app.services.task_submission import TaskFileSynchronizer, code_block_hash, review_target_hash
 
 
 SCORE_FIELDS = ["logic_score", "performance_score", "security_score", "readable_score", "code_style_score"]
@@ -96,6 +99,8 @@ class ReviewTaskService:
         self,
         settings: Settings | None = None,
         background_provider: FileBackgroundProvider | None = None,
+        stop_event: Event | None = None,
+        lease_token: str = "",
     ) -> None:
         self.settings = settings or get_settings()
         self.diff_service = CodeDiffService(self.settings)
@@ -110,6 +115,29 @@ class ReviewTaskService:
         self.static_findings_by_file: dict[str, list[StaticFinding]] = {}
         self.task_model_rounds: list[ModelRoundTrace] = []
         self.rule_settings = self.settings
+        self.project_exclude_paths: list[str] = []
+        self.stop_event = stop_event
+        self.lease_token = lease_token
+        self.active_task_id = ""
+        self.active_trigger_revision = 0
+        self._usage_lock = Lock()
+        self._initial_usage: dict[str, Any] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "elapsed_ms": 0,
+            "call_count": 0,
+            "process_time": 0,
+            "tool_calls": {},
+        }
+        self._run_usage: dict[str, Any] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "elapsed_ms": 0,
+            "call_count": 0,
+            "tool_calls": {},
+        }
 
     def create_mock_task(self) -> TaskModel:
         task = TaskModel(
@@ -134,31 +162,44 @@ class ReviewTaskService:
         started_at = time.monotonic()
         self.task_model_rounds = []
         self.file_backgrounds = {}
+        self.active_task_id = str(task.id)
+        self.active_trigger_revision = task.trigger_revision or 0
+        self.project_exclude_paths = project_exclude_paths(task.project_id)
+        self.diff_service.set_project_exclude_paths(self.project_exclude_paths)
+        self._initialize_usage(task)
         task.state = 1
+        task.completion_status = "running"
+        task.last_start_time = utc_now()
+        task.interrupt_requested = False
         task.update_time = utc_now()
         task.save()
 
         try:
+            self._check_interrupted()
             review_context, review_root = self._collect_targets(task)
             self.review_context = review_context
+            TaskFileSynchronizer(self.diff_service).synchronize(task, review_context)
             self.rule_settings = self._resolve_rule_settings(review_root)
             self.semantic_index = (
-                SemanticIndex(review_root, self.settings)
+                SemanticIndex(review_root, self.settings, self.project_exclude_paths)
                 if self.settings.review_semantic_index_enabled
                 else None
             )
             self.static_findings_by_file = SarifFindingLoader(self.settings).load(review_root)
             targets = review_context.targets
-            target_names = {target.file_name for target in targets}
-            if self.settings.review_resume_enabled:
-                CodeFileModel.objects(task_id=str(task.id), file_name__nin=list(target_names)).delete()
-            else:
-                CodeFileModel.objects(task_id=str(task.id)).delete()
-
+            self._check_interrupted()
             saved_files = self._review_targets(task, targets, review_root)
 
+            self._check_interrupted()
             self._finish_task(task, saved_files, started_at)
+            if task.state == TASK_STATE_COMPLETED and not task.completion_email_sent:
+                ReviewNotificationService().send_review_completed(task)
+                task.completion_email_sent = True
+                task.save()
             return task
+        except ReviewInterruptedError:
+            self._mark_task_interrupted(task)
+            return TaskModel.objects(id=task.id).first() or task
         except Exception as exc:
             task.retry_count = (task.retry_count or 0) + 1
             task.state = TASK_STATE_PARTIAL
@@ -171,6 +212,10 @@ class ReviewTaskService:
                 },
             }
             task.task_model_rounds = self.task_model_rounds
+            task.lease_owner = ""
+            task.lease_token = ""
+            task.lease_expires_at = None
+            task.heartbeat_time = None
             task.update_time = utc_now()
             task.save()
             raise
@@ -181,15 +226,22 @@ class ReviewTaskService:
         task.save()
 
         if task_type == TASK_TYPE_INCREMENTAL:
-            base_dir, head_dir = self.diff_service.resolve_incremental_paths(
-                task.project_id,
-                task.copy_from_version,
-                task.review_version,
-                task.parent_path,
-            )
+            if task.copy_from_version_path and task.review_version_path:
+                base_dir, head_dir = Path(task.copy_from_version_path), Path(task.review_version_path)
+            else:
+                base_dir, head_dir = self.diff_service.resolve_incremental_paths(
+                    task.project_id,
+                    task.copy_from_version,
+                    task.review_version,
+                    task.parent_path,
+                )
             return self.diff_service.compare_directories_with_context(base_dir, head_dir), head_dir
 
-        target_dir = self.diff_service.resolve_full_scan_path(task.project_id, task.review_version, task.parent_path)
+        target_dir = (
+            Path(task.review_version_path)
+            if task.review_version_path
+            else self.diff_service.resolve_full_scan_path(task.project_id, task.review_version, task.parent_path)
+        )
         return self.diff_service.scan_directory_with_context(target_dir), target_dir
 
     def _resolve_task_type(self, task: TaskModel) -> int:
@@ -212,8 +264,12 @@ class ReviewTaskService:
 
         batches = self._group_target_batches(task, queued_targets, batch_size)
         for batch_index, batch in enumerate(batches, start=1):
+            self._check_interrupted()
             if concurrency == 1 or len(batch) == 1:
-                batch_results = [self._review_file(task, target, review_root) for target in batch]
+                batch_results = []
+                for target in batch:
+                    self._check_interrupted()
+                    batch_results.append(self._review_file(task, target, review_root))
                 self._deduplicate_batch_issues(task, batch_results, batch_index)
                 saved_files.extend(batch_results)
                 continue
@@ -226,6 +282,7 @@ class ReviewTaskService:
                 batch_results: list[CodeFileModel] = []
                 for future in as_completed(future_map):
                     batch_results.append(future.result())
+                    self._check_interrupted()
                 batch_results = sorted(batch_results, key=lambda code_file: code_file.file_name)
                 self._deduplicate_batch_issues(task, batch_results, batch_index)
                 saved_files.extend(batch_results)
@@ -332,9 +389,9 @@ class ReviewTaskService:
         if not code_file:
             return None
         extra = code_file.extra or {}
-        if extra.get("source_hash") != source_hash:
+        if (code_file.source_hash or extra.get("source_hash")) != source_hash:
             return None
-        if extra.get("review_fingerprint") != review_fingerprint:
+        if (code_file.review_fingerprint or extra.get("review_fingerprint")) != review_fingerprint:
             return None
         if extra.get("status") == "skipped_budget":
             return None
@@ -575,15 +632,122 @@ class ReviewTaskService:
         return diff_tokens + code_tokens
 
     def _source_hash(self, target: ReviewTarget) -> str:
-        payload = "\n".join(
-            [
-                target.file_name,
-                target.language,
-                target.full_code,
-                *target.diff_lines,
-            ]
+        return review_target_hash(target)
+
+    def _block_review_fingerprint(
+        self,
+        task: TaskModel,
+        target: ReviewTarget,
+        block_hash: str,
+        background: FileReviewBackground,
+    ) -> str:
+        payload = {
+            "pipeline_version": REVIEW_PIPELINE_VERSION,
+            "project_id": task.project_id,
+            "file_name": target.file_name,
+            "language": target.language,
+            "block_hash": block_hash,
+            "background": background.content,
+            "background_source": background.source,
+            "model": self.settings.llm_model,
+            "mock": self.llm_client.is_mock,
+            "rules": review_rules_for(target.file_name, target.language, self.rule_settings),
+            "relocation_enabled": self.settings.review_relocation_enabled,
+            "filter_enabled": self.settings.review_filter_enabled,
+            "evidence_required": self.settings.review_evidence_required,
+            "semantic_index_enabled": self.settings.review_semantic_index_enabled,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+    def _initialize_usage(self, task: TaskModel) -> None:
+        blocks = [
+            block
+            for code_file in CodeFileModel.objects(task_id=str(task.id))
+            for block in code_file.code_blocks
+        ]
+        persisted = {
+            "prompt_tokens": sum(block.llm_prompt_tokens or 0 for block in blocks),
+            "completion_tokens": sum(block.llm_completion_tokens or 0 for block in blocks),
+            "total_tokens": sum(block.llm_total_tokens or 0 for block in blocks),
+            "elapsed_ms": sum(block.llm_elapsed_ms or 0 for block in blocks),
+            "call_count": sum(
+                1 for block in blocks for trace in block.model_rounds if trace.model != "local"
+            ),
+        }
+        self._initial_usage = {
+            "prompt_tokens": max(task.llm_prompt_tokens or 0, persisted["prompt_tokens"]),
+            "completion_tokens": max(task.llm_completion_tokens or 0, persisted["completion_tokens"]),
+            "total_tokens": max(task.llm_total_tokens or 0, persisted["total_tokens"]),
+            "elapsed_ms": max(task.llm_elapsed_ms or 0, persisted["elapsed_ms"]),
+            "call_count": max(task.llm_call_count or 0, persisted["call_count"]),
+            "process_time": task.process_time or 0,
+            "tool_calls": dict(task.tool_call_summary or {}),
+        }
+        self._run_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "elapsed_ms": 0,
+            "call_count": 0,
+            "tool_calls": {},
+        }
+
+    def _accumulate_block_usage(
+        self,
+        model_rounds: list[ModelRoundTrace],
+        tool_calls: list[ToolCallTrace],
+    ) -> None:
+        summary = self._summarize_model_round_tokens(model_rounds)
+        with self._usage_lock:
+            for field in ["prompt_tokens", "completion_tokens", "total_tokens", "elapsed_ms"]:
+                self._run_usage[field] += summary[field]
+            self._run_usage["call_count"] += sum(1 for trace in model_rounds if trace.model != "local")
+            for trace in tool_calls:
+                counts = self._run_usage["tool_calls"]
+                counts[trace.tool_name] = counts.get(trace.tool_name, 0) + 1
+
+    def _check_interrupted(self) -> None:
+        if self.stop_event is not None and self.stop_event.is_set():
+            raise ReviewInterruptedError("Review preempted by a higher-priority task")
+        if not self.active_task_id:
+            return
+        current = TaskModel.objects(id=self.active_task_id).only(
+            "trigger_revision",
+            "interrupt_requested",
+            "lease_token",
+        ).first()
+        if current is None:
+            raise ReviewInterruptedError("Review task was deleted")
+        if (current.trigger_revision or 0) != self.active_trigger_revision:
+            raise ReviewInterruptedError("Review task was triggered again")
+        if current.interrupt_requested:
+            raise ReviewInterruptedError("Review interruption was requested")
+        if self.lease_token and current.lease_token != self.lease_token:
+            raise ReviewInterruptedError("Review task lease is no longer owned by this worker")
+
+    def _mark_task_interrupted(self, task: TaskModel) -> None:
+        current = TaskModel.objects(id=task.id).first()
+        if current is None:
+            return
+        owns_lease = not self.lease_token or current.lease_token == self.lease_token
+        same_revision = (current.trigger_revision or 0) == self.active_trigger_revision
+        if owns_lease:
+            current.lease_owner = ""
+            current.lease_token = ""
+            current.lease_expires_at = None
+            current.heartbeat_time = None
+        if same_revision:
+            current.state = 0
+            current.completion_status = "interrupted"
+            current.interrupt_requested = False
+        current.update_time = utc_now()
+        current.save()
+        CodeFileModel.objects(task_id=str(task.id), state=1).update(
+            set__state=0,
+            set__update_time=utc_now(),
         )
-        return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
     def _target_hash(
         self,
@@ -619,15 +783,68 @@ class ReviewTaskService:
         ).hexdigest()
 
     def _review_file(self, task: TaskModel, target: ReviewTarget, review_root: Path) -> CodeFileModel:
-        source_hash = self._source_hash(target)
+        self._check_interrupted()
+        source_hash = review_target_hash(target)
         background = self._file_background(task, target)
         review_fingerprint = self._target_hash(task, target, source_hash, background)
         estimated_tokens = self._estimate_target_tokens(target)
-        CodeFileModel.objects(task_id=str(task.id), file_name=target.file_name).delete()
         related_files = self._related_files(target)
         related_files_context = self._related_files_context(related_files)
-        code_blocks: list[CodeBlock] = []
-        for block_index, block_lines in enumerate(self.diff_service.split_code_blocks(target.diff_lines)):
+        block_inputs = self.diff_service.split_code_blocks(target.diff_lines)
+        code_file = CodeFileModel.objects(task_id=str(task.id), file_name=target.file_name).first()
+        if code_file is None:
+            code_file = CodeFileModel(
+                task_id=str(task.id),
+                project_id=task.project_id,
+                review_version=task.review_version,
+                copy_from_version=task.copy_from_version,
+                task_type=task.task_type,
+                file_name=target.file_name,
+                code_blocks=[
+                    CodeBlock(
+                        block_id=index,
+                        block_hash=code_block_hash(lines),
+                        contents=list(lines),
+                        review_state=0,
+                    )
+                    for index, lines in enumerate(block_inputs)
+                ],
+            )
+
+        code_file.state = 1
+        code_file.trigger_revision = self.active_trigger_revision
+        code_file.source_hash = source_hash
+        code_file.extra = {**(code_file.extra or {}), "status": "reviewing", "review_complete": False}
+        code_file.update_time = utc_now()
+        code_file.save()
+
+        for block_index, block_lines in enumerate(block_inputs):
+            self._check_interrupted()
+            block_digest = code_block_hash(block_lines)
+            block_fingerprint = self._block_review_fingerprint(
+                task,
+                target,
+                block_digest,
+                background,
+            )
+            existing_block = code_file.code_blocks[block_index]
+            if (
+                existing_block.block_hash == block_digest
+                and existing_block.review_fingerprint == block_fingerprint
+                and existing_block.main_task_completed
+                and not existing_block.failure_message
+            ):
+                existing_block.block_id = block_index
+                existing_block.review_state = 2
+                continue
+
+            existing_attempt_count = existing_block.review_attempt_count or 0
+            existing_block.review_state = 1
+            existing_block.review_attempt_count = existing_attempt_count + 1
+            existing_block.update_time = utc_now()
+            code_file.code_blocks[block_index] = existing_block
+            code_file.save()
+
             block_started_at = time.monotonic()
             static_findings = self._static_findings_for_block(target.file_name, block_lines)
             static_analysis_context = self._static_analysis_context(static_findings)
@@ -640,6 +857,7 @@ class ReviewTaskService:
                 static_analysis_context,
                 background.content,
             )
+            self._check_interrupted()
             main_failure_message = ""
             try:
                 main_result = self._run_main_task(
@@ -653,6 +871,8 @@ class ReviewTaskService:
                 )
                 issues = main_result.issues
                 main_failure_message = main_result.failure_message
+            except ReviewInterruptedError:
+                raise
             except Exception as exc:
                 main_failure_message = f"main_task LLM failed: {type(exc).__name__}: {exc}"
                 issues = []
@@ -691,9 +911,20 @@ class ReviewTaskService:
             )
             tool_call_traces = main_result.tool_call_traces or []
             token_summary = self._summarize_model_round_tokens(model_rounds)
+            failure_message = "; ".join(
+                message
+                for message in [
+                    plan_result.failure_message,
+                    main_failure_message,
+                    relocation_failure,
+                    filter_failure,
+                ]
+                if message
+            )
             block = CodeBlock(
                 block_id=block_index,
-                block_hash=self._hash_lines(block_lines),
+                block_hash=block_digest,
+                review_fingerprint=block_fingerprint,
                 contents=block_lines,
                 comment=plan_result.comment,
                 plan_change_summary=plan_result.change_summary,
@@ -721,36 +952,50 @@ class ReviewTaskService:
                 main_task_round_count=main_result.round_count,
                 model_rounds=model_rounds,
                 tool_calls=tool_call_traces,
-                failure_message="; ".join(
-                    message
-                    for message in [
-                        plan_result.failure_message,
-                        main_failure_message,
-                        relocation_failure,
-                        filter_failure,
-                    ]
-                    if message
-                ),
+                failure_message=failure_message,
+                review_state=2 if main_result.completed and not failure_message else 3,
+                review_attempt_count=existing_attempt_count + 1,
+                update_time=utc_now(),
             )
-            code_blocks.append(block)
+            self._check_interrupted()
+            code_file.code_blocks[block_index] = block
+            code_file.comment_line_number = sum(
+                self._visible_issue_count(item.issues) for item in code_file.code_blocks
+            )
+            code_file.extra = {
+                **(code_file.extra or {}),
+                "status": "reviewing",
+                "completed_block_num": sum(
+                    1 for item in code_file.code_blocks if item.main_task_completed and not item.failure_message
+                ),
+            }
+            code_file.update_time = utc_now()
+            code_file.save()
+            self._accumulate_block_usage(model_rounds, tool_call_traces)
 
+        code_blocks = list(code_file.code_blocks)
         self._merge_duplicate_file_issues(code_blocks)
         scores = self._average_block_scores(code_blocks)
-        review_complete = bool(code_blocks) and all(block.main_task_completed for block in code_blocks)
-        code_file = CodeFileModel(
-            task_id=str(task.id),
-            project_id=task.project_id,
-            review_version=task.review_version,
-            copy_from_version=task.copy_from_version,
-            task_type=task.task_type,
-            file_name=target.file_name,
-            background=background.content,
-            background_source=background.source,
-            code_blocks=code_blocks,
-            code_line_num=target.code_line_num,
-            add_code_line_num=target.add_code_line_num,
-            comment_line_number=sum(self._visible_issue_count(block.issues) for block in code_blocks),
-            extra={
+        review_complete = bool(code_blocks) and all(
+            block.main_task_completed and not block.failure_message for block in code_blocks
+        )
+        code_file.project_id = task.project_id
+        code_file.review_version = task.review_version
+        code_file.copy_from_version = task.copy_from_version
+        code_file.task_type = task.task_type
+        code_file.file_name = target.file_name
+        code_file.state = 2 if review_complete else 3
+        code_file.source_hash = source_hash
+        code_file.review_fingerprint = review_fingerprint
+        code_file.trigger_revision = self.active_trigger_revision
+        code_file.background = background.content
+        code_file.background_source = background.source
+        code_file.code_blocks = code_blocks
+        code_file.code_line_num = target.code_line_num
+        code_file.add_code_line_num = target.add_code_line_num
+        code_file.comment_line_number = sum(self._visible_issue_count(block.issues) for block in code_blocks)
+        code_file.extra = {
+                **(code_file.extra or {}),
                 "status": "reviewed" if review_complete else "partial",
                 "review_complete": review_complete,
                 "failed_block_num": sum(1 for block in code_blocks if not block.main_task_completed),
@@ -766,9 +1011,11 @@ class ReviewTaskService:
                 "static_corroborated_issue_count": sum(
                     1 for block in code_blocks for issue in block.issues if issue.static_corroborated
                 ),
-            },
-            **scores,
-        )
+            }
+        for field_name, value in scores.items():
+            setattr(code_file, field_name, value)
+        code_file.update_time = utc_now()
+        self._check_interrupted()
         code_file.save()
         return code_file
 
@@ -1060,6 +1307,7 @@ class ReviewTaskService:
             current_diff_lines=diff_lines,
             diff_map=self.review_context.diff_map,
             semantic_index=self.semantic_index,
+            project_exclude_paths=self.project_exclude_paths,
         )
         model_rounds: list[ModelRoundTrace] = []
         tool_call_traces: list[ToolCallTrace] = []
@@ -1097,6 +1345,7 @@ class ReviewTaskService:
             )
 
         for round_index in range(1, max_tool_rounds + 1):
+            self._check_interrupted()
             round_count = round_index
             if time.monotonic() - main_started_at >= max(1, self.settings.llm_file_timeout_seconds):
                 runner.failure_messages.append(
@@ -1885,6 +2134,8 @@ class ReviewTaskService:
         ]
         task.state = TASK_STATE_COMPLETED if not incomplete_files else TASK_STATE_PARTIAL
         task.completion_status = "completed" if not incomplete_files else "partial"
+        if incomplete_files:
+            task.retry_count = (task.retry_count or 0) + 1
         task.file_num = len(code_files)
         task.reviewed_file_num = sum(
             1
@@ -1907,23 +2158,34 @@ class ReviewTaskService:
             if (code_file.extra or {}).get("status") == "reviewed"
         )
         task.token_budget_num = self._effective_token_budget(task)
-        task.llm_prompt_tokens = sum(
-            block.llm_prompt_tokens or 0 for code_file in code_files for block in code_file.code_blocks
-        ) + sum(trace.prompt_tokens or 0 for trace in self.task_model_rounds)
-        task.llm_completion_tokens = sum(
-            block.llm_completion_tokens or 0 for code_file in code_files for block in code_file.code_blocks
-        ) + sum(trace.completion_tokens or 0 for trace in self.task_model_rounds)
-        task.llm_total_tokens = sum(
-            block.llm_total_tokens or 0 for code_file in code_files for block in code_file.code_blocks
-        ) + sum(trace.total_tokens or 0 for trace in self.task_model_rounds)
-        task.llm_elapsed_ms = sum(
-            block.llm_elapsed_ms or 0 for code_file in code_files for block in code_file.code_blocks
-        ) + sum(trace.elapsed_ms or 0 for trace in self.task_model_rounds)
-        tool_call_summary: dict[str, int] = {}
-        for code_file in code_files:
-            for block in code_file.code_blocks:
-                for tool_call in block.tool_calls:
-                    tool_call_summary[tool_call.tool_name] = tool_call_summary.get(tool_call.tool_name, 0) + 1
+        task_round_usage = self._summarize_model_round_tokens(self.task_model_rounds)
+        with self._usage_lock:
+            run_usage = {
+                **self._run_usage,
+                "tool_calls": dict(self._run_usage.get("tool_calls") or {}),
+            }
+        task.llm_prompt_tokens = (
+            self._initial_usage["prompt_tokens"] + run_usage["prompt_tokens"] + task_round_usage["prompt_tokens"]
+        )
+        task.llm_completion_tokens = (
+            self._initial_usage["completion_tokens"]
+            + run_usage["completion_tokens"]
+            + task_round_usage["completion_tokens"]
+        )
+        task.llm_total_tokens = (
+            self._initial_usage["total_tokens"] + run_usage["total_tokens"] + task_round_usage["total_tokens"]
+        )
+        task.llm_elapsed_ms = (
+            self._initial_usage["elapsed_ms"] + run_usage["elapsed_ms"] + task_round_usage["elapsed_ms"]
+        )
+        task.llm_call_count = (
+            self._initial_usage["call_count"]
+            + run_usage["call_count"]
+            + sum(1 for trace in self.task_model_rounds if trace.model != "local")
+        )
+        tool_call_summary: dict[str, int] = dict(self._initial_usage.get("tool_calls") or {})
+        for tool_name, count in run_usage["tool_calls"].items():
+            tool_call_summary[tool_name] = tool_call_summary.get(tool_name, 0) + count
         task.tool_call_summary = tool_call_summary
         task.task_model_rounds = self.task_model_rounds
         task.project_summary = project_summary["summary"]
@@ -1951,7 +2213,12 @@ class ReviewTaskService:
             "_resume": project_summary["resume"],
             "_project_summary": project_summary,
         }
-        task.process_time = int((time.monotonic() - started_at) * 1000)
+        task.process_time = self._initial_usage["process_time"] + int((time.monotonic() - started_at) * 1000)
+        task.lease_owner = ""
+        task.lease_token = ""
+        task.lease_expires_at = None
+        task.heartbeat_time = None
+        task.interrupt_requested = False
         task.update_time = utc_now()
         task.save()
 
@@ -2517,7 +2784,7 @@ class ReviewTaskService:
             yield line_number, line[9:]
 
     def _hash_lines(self, lines: list[str]) -> str:
-        return hashlib.md5("\n".join(lines).encode("utf-8")).hexdigest()
+        return code_block_hash(lines)
 
     def _score(self, value: Any, default: int) -> int:
         try:

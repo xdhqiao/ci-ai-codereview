@@ -10,7 +10,9 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     app_enable_scheduler: bool = False
-    scheduler_interval_seconds: int = 300
+    scheduler_interval_seconds: int = 5
+    scheduler_lease_seconds: int = 120
+    scheduler_max_task_retries: int = 3
 
     mongodb_uri: str = "mongodb://mongodb:27017/ci_ai_codereview"
     mongodb_db: str = "ci_ai_codereview"
@@ -51,6 +53,12 @@ class Settings(BaseSettings):
     review_resume_enabled: bool = True
     code_repository_root: str = ""
     review_exclude_dirs: str = ".git,.opencodereview,__pycache__,node_modules,.venv,venv,dist,build,.pytest_cache"
+    review_exclude_paths: str = (
+        "MCAL,Math,General,COMM,CANVector,main.c,Wdg,Smu,SafeTlib,SafeTpack,ERU_BSW,"
+        "Eth_generated,Dem,DemConfig,FiM,FiMConfig,VStdLib,Etpu,freertos,FW_LIB,StartUp,"
+        "Os_Stubs.c,Os_TaskInfr.c,.vscode,.history,**pycache**,BootloaderPlus_CData.c,"
+        "PrjVer.c,PrjVer.h,SoftVer_Release.h"
+    )
     review_allowed_extensions: str = Field(
         default=(
             ".py,.js,.jsx,.ts,.tsx,.go,.java,.kt,.kts,.c,.h,.cpp,.hpp,.cc,.cs,"
@@ -98,6 +106,10 @@ class Settings(BaseSettings):
     @property
     def excluded_dir_set(self) -> set[str]:
         return {item.strip() for item in self.review_exclude_dirs.split(",") if item.strip()}
+
+    @property
+    def excluded_path_list(self) -> list[str]:
+        return [item.strip() for item in self.review_exclude_paths.split(",") if item.strip()]
 
     @property
     def allowed_extension_set(self) -> set[str]:

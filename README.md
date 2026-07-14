@@ -36,6 +36,7 @@ pytest
 
 - `GET /health`：健康检查，同时 ping MongoDB。
 - `POST /tasks`：创建审核任务。`task_type=1` 表示本地两个目录的增量扫描，`task_type=2` 表示全量扫描。
+- `POST /tasks/trigger`：Jenkins/client 触发入口。校验代码目录、创建或重置 Task，并在返回前把所有待审文件和 Block 预写入 MongoDB。
 - `GET /tasks`、`GET /tasks/{task_id}`、`DELETE /tasks/{task_id}`：任务 CRUD。
 - `POST /tasks/mock`：按环境变量创建一个 mock 任务。
 - `POST /tasks/{task_id}/review`：执行审核流程。任务开始时 `state=1`，所有文件审核完成后 `state=2`；存在预算跳过或 main_task 未闭环的文件时为 `state=3`、`completion_status=partial`。
@@ -44,6 +45,26 @@ pytest
 - `GET /api/reports/tasks/{task_id}`：获取报告聚合数据；支持 `author`、`page`、`page_size`，默认及最大每页 300 个文件。
 - `GET /api/reports/{project_id}/{review_version}_vs_{copy_from_version}.html`：按项目和版本组合获取同一份报告数据。
 - `POST /api/feedback/{file_id}/{block_id}/{issue_id}`：保存 issue 反馈。赞成传 `feedback_type=agree`；反对传 `feedback_type=reject` 和非空 `feedback_content`。
+
+## Client 与 Server
+
+Jenkins 作为 client，只调用触发接口；FastAPI 与 `AsyncIOScheduler` 组成 server。全量任务使用 `copy_from_version=0_version`，其他值表示增量任务：
+
+```bash
+python scripts/jenkins_trigger.py \
+  --server http://127.0.0.1:8000 \
+  --project-id demo_c \
+  --review-version feature \
+  --copy-from-version master \
+  --review-version-path /repositories/demo_c/feature \
+  --copy-from-version-path /repositories/demo_c/master
+```
+
+Jenkins 参数中的路径必须是 server 进程可见的路径。Compose 默认把宿主 `CODE_REPOSITORY_HOST_ROOT=./demo_repos` 只读映射到容器 `CODE_REPOSITORY_CONTAINER_ROOT=/repositories`；Jenkins 应传容器路径。Jenkins 与 server 不在同一机器时，应把仓库放到双方约定的共享存储，或先同步到 server 的挂载目录。
+
+触发阶段按全局 `REVIEW_EXCLUDE_PATHS`、目录排除规则和 `ProjectModel.exclude_path` 过滤文件，被排除文件不会创建 `CodeFileModel`。相同五元组参数重复触发时复用同一 Task，累计 token、LLM 调用次数和耗时；MD5 未变化的已完成 Block 原样保留，变化的 Block 清空审核结果并回到待审状态。
+
+server 默认每 5 秒扫描一次。增量任务优先于全量任务，同优先级按 `create_time` FIFO；全量执行期间出现增量任务时会协作式中断，并在下一次领取时从已落库的未完成 Block 继续。`state=0/1/2/3/4` 分别表示待审、审核中、完成、部分完成或失败、触发准备中。租约和心跳用于服务重启及多实例恢复，过期租约会被重新领取。每个 Block 完成后立即落库，不需要等待整个项目完成；任务完成后调用当前仅记录 demo 日志的邮件通知函数。
 
 ## 审核报告
 

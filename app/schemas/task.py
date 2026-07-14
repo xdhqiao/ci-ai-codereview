@@ -10,6 +10,8 @@ class TaskCreate(BaseModel):
     project_id: str
     review_version: str
     copy_from_version: str = ""
+    review_version_path: str = ""
+    copy_from_version_path: str = ""
     task_type: int = Field(default=2, description="1 means incremental scan, 2 means full scan")
     state: int = 0
     submitter: str | None = None
@@ -22,6 +24,8 @@ class TaskResponse(BaseModel):
     project_id: str
     review_version: str
     copy_from_version: str
+    review_version_path: str
+    copy_from_version_path: str
     task_type: int | None
     state: int
     submitter: str | None
@@ -49,11 +53,19 @@ class TaskResponse(BaseModel):
     llm_completion_tokens: int
     llm_total_tokens: int
     llm_elapsed_ms: int
+    llm_call_count: int
     tool_call_summary: dict
     task_model_rounds: list[ModelRoundTraceResponse]
     project_summary: str
     parent_path: str | None
     developer_issue_summary: dict
+    trigger_count: int
+    trigger_revision: int
+    lease_owner: str
+    lease_expires_at: datetime | None
+    heartbeat_time: datetime | None
+    interrupt_requested: bool
+    completion_email_sent: bool
     created_by: str
     create_time: datetime
     updated_by: str
@@ -66,6 +78,8 @@ class TaskResponse(BaseModel):
             project_id=task.project_id,
             review_version=task.review_version,
             copy_from_version=task.copy_from_version,
+            review_version_path=task.review_version_path or "",
+            copy_from_version_path=task.copy_from_version_path or "",
             task_type=task.task_type,
             state=task.state,
             submitter=task.submitter,
@@ -93,11 +107,19 @@ class TaskResponse(BaseModel):
             llm_completion_tokens=task.llm_completion_tokens or 0,
             llm_total_tokens=task.llm_total_tokens or 0,
             llm_elapsed_ms=task.llm_elapsed_ms or 0,
+            llm_call_count=task.llm_call_count or 0,
             tool_call_summary=task.tool_call_summary or {},
             task_model_rounds=[ModelRoundTraceResponse.from_model(trace) for trace in task.task_model_rounds],
             project_summary=task.project_summary or "",
             parent_path=task.parent_path,
             developer_issue_summary=task.developer_issue_summary or {},
+            trigger_count=task.trigger_count or 0,
+            trigger_revision=task.trigger_revision or 0,
+            lease_owner=task.lease_owner or "",
+            lease_expires_at=task.lease_expires_at,
+            heartbeat_time=task.heartbeat_time,
+            interrupt_requested=bool(task.interrupt_requested),
+            completion_email_sent=bool(task.completion_email_sent),
             created_by=task.created_by or "",
             create_time=task.create_time,
             updated_by=task.updated_by or "",
@@ -108,3 +130,13 @@ class TaskResponse(BaseModel):
 class TaskListResponse(BaseModel):
     items: list[TaskResponse]
     total: int
+
+
+class JenkinsTaskTrigger(BaseModel):
+    project_id: str
+    review_version: str
+    copy_from_version: str = "0_version"
+    review_version_path: str
+    copy_from_version_path: str = ""
+    submitter: str | None = None
+    created_by: str = "jenkins"

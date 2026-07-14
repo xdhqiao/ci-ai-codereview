@@ -144,6 +144,7 @@ class ToolCallTraceResponse(BaseModel):
 class CodeBlockResponse(BaseModel):
     block_id: int
     block_hash: str | None
+    review_fingerprint: str
     contents: list[str]
     comment: str
     plan_change_summary: str
@@ -178,6 +179,7 @@ class CodeBlockResponse(BaseModel):
         return cls(
             block_id=block.block_id,
             block_hash=block.block_hash,
+            review_fingerprint=block.review_fingerprint or "",
             contents=list(block.contents or []),
             comment=block.comment,
             plan_change_summary=block.plan_change_summary or "",
@@ -217,6 +219,10 @@ class CodeFileResponse(BaseModel):
     copy_from_version: str
     task_type: int | None
     file_name: str
+    state: int
+    source_hash: str
+    review_fingerprint: str
+    trigger_revision: int
     background: str
     background_source: str
     code_blocks: list[CodeBlockResponse]
@@ -230,6 +236,7 @@ class CodeFileResponse(BaseModel):
     code_style_score: int
     file_author: str
     create_time: datetime
+    update_time: datetime | None
     extra: dict
 
     @classmethod
@@ -242,6 +249,10 @@ class CodeFileResponse(BaseModel):
             copy_from_version=code_file.copy_from_version,
             task_type=code_file.task_type,
             file_name=code_file.file_name,
+            state=code_file.state or 0,
+            source_hash=code_file.source_hash or "",
+            review_fingerprint=code_file.review_fingerprint or "",
+            trigger_revision=code_file.trigger_revision or 0,
             background=code_file.background or "",
             background_source=code_file.background_source or "",
             code_blocks=[CodeBlockResponse.from_model(block) for block in code_file.code_blocks],
@@ -255,6 +266,7 @@ class CodeFileResponse(BaseModel):
             code_style_score=code_file.code_style_score,
             file_author=code_file.file_author or "",
             create_time=code_file.create_time,
+            update_time=code_file.update_time,
             extra=code_file.extra or {},
         )
 

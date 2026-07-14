@@ -9,19 +9,19 @@ from app.services.prompts import MAIN_TOOL_DEFINITIONS
 def test_file_find_and_file_read_diff(tmp_path: Path):
     source_dir = tmp_path / "src"
     source_dir.mkdir()
-    (source_dir / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    (source_dir / "entry.c").write_text("int entry(void) { return 0; }\n", encoding="utf-8")
     runner = ReviewToolRunner(
         tmp_path,
         Settings(mongo_mock=True, llm_mock_enabled=True),
-        current_file_name="src/main.c",
-        current_diff_lines=["     1+  int main(void) { return 0; }"],
+        current_file_name="src/entry.c",
+        current_diff_lines=["     1+  int entry(void) { return 0; }"],
     )
 
-    find_result = runner.run("file_find", {"query": "main.c"})
-    diff_result = runner.run("file_read_diff", {"file_path": "src/main.c"})
+    find_result = runner.run("file_find", {"query": "entry.c"})
+    diff_result = runner.run("file_read_diff", {"file_path": "src/entry.c"})
 
-    assert find_result["matches"] == [{"file_path": "src/main.c"}]
-    assert diff_result["lines"][0]["line"] == "     1+  int main(void) { return 0; }"
+    assert find_result["matches"] == [{"file_path": "src/entry.c"}]
+    assert diff_result["lines"][0]["line"] == "     1+  int entry(void) { return 0; }"
 
 
 def test_read_file_rejects_path_escape(tmp_path: Path):
@@ -64,21 +64,21 @@ def test_file_read_diff_can_read_other_changed_and_deleted_files(tmp_path: Path)
     base_dir.mkdir()
     head_dir.mkdir()
     (base_dir / "deleted.c").write_text("int deleted(void) { return 1; }\n", encoding="utf-8")
-    (base_dir / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
-    (head_dir / "main.c").write_text("int main(void) { return 1; }\n", encoding="utf-8")
+    (base_dir / "entry.c").write_text("int entry(void) { return 0; }\n", encoding="utf-8")
+    (head_dir / "entry.c").write_text("int entry(void) { return 1; }\n", encoding="utf-8")
     settings = Settings(mongo_mock=True, llm_mock_enabled=True)
     collection = CodeDiffService(settings).compare_directories_with_context(base_dir, head_dir)
     runner = ReviewToolRunner(
         head_dir,
         settings,
-        current_file_name="main.c",
-        current_diff_lines=collection.diff_map["main.c"],
+        current_file_name="entry.c",
+        current_diff_lines=collection.diff_map["entry.c"],
         diff_map=collection.diff_map,
     )
 
-    result = runner.run("file_read_diff", {"path_array": ["main.c", "deleted.c"]})
+    result = runner.run("file_read_diff", {"path_array": ["entry.c", "deleted.c"]})
 
-    assert [item["file_path"] for item in result["files"]] == ["main.c", "deleted.c"]
+    assert [item["file_path"] for item in result["files"]] == ["entry.c", "deleted.c"]
     assert any(line[6] == "-" for line in collection.diff_map["deleted.c"])
     assert "deleted.c" not in [target.file_name for target in collection.targets]
     assert any(item.file_name == "deleted.c" and item.change_type == "DELETED" for item in collection.changed_files)
@@ -141,7 +141,7 @@ def test_semantic_tools_find_c_definitions_references_and_calls(tmp_path: Path):
         "int calculate(int value) { return add_one(value); }\n",
         encoding="utf-8",
     )
-    (tmp_path / "main.c").write_text(
+    (tmp_path / "entry.c").write_text(
         "int calculate(int value);\n"
         "int main(void) { return calculate(41); }\n",
         encoding="utf-8",
@@ -149,7 +149,7 @@ def test_semantic_tools_find_c_definitions_references_and_calls(tmp_path: Path):
     runner = ReviewToolRunner(
         tmp_path,
         Settings(mongo_mock=True, llm_mock_enabled=True),
-        current_file_name="main.c",
+        current_file_name="entry.c",
     )
 
     definition = runner.run("find_definition", {"symbol": "calculate"})
@@ -163,9 +163,9 @@ def test_semantic_tools_find_c_definitions_references_and_calls(tmp_path: Path):
         {"symbol": "calculate", "direction": "incoming", "depth": 1},
     )
 
-    assert definition["definitions"][0]["file_path"] == "main.c"
+    assert definition["definitions"][0]["file_path"] == "entry.c"
     assert any(item["file_path"] == "math.c" and item["is_definition"] for item in definition["definitions"])
-    assert any(item["file_path"] == "main.c" and item["reference_kind"] == "call" for item in references["references"])
+    assert any(item["file_path"] == "entry.c" and item["reference_kind"] == "call" for item in references["references"])
     assert any(edge["caller"] == "calculate" and edge["callee"] == "add_one" for edge in outgoing["edges"])
     assert any(edge["caller"] == "main" and edge["callee"] == "calculate" for edge in incoming["edges"])
     assert definition["index"]["tree_sitter_files"] == 2

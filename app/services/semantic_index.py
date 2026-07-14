@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app.core.config import Settings
+from app.services.exclusions import ReviewPathExcluder
 
 
 @dataclass(frozen=True)
@@ -112,9 +113,15 @@ class SemanticIndex:
         "delete",
     }
 
-    def __init__(self, root_dir: Path, settings: Settings) -> None:
+    def __init__(
+        self,
+        root_dir: Path,
+        settings: Settings,
+        project_exclude_paths: list[str] | None = None,
+    ) -> None:
         self.root_dir = root_dir.resolve()
         self.settings = settings
+        self.path_excluder = ReviewPathExcluder(settings, project_exclude_paths)
         self.definitions: dict[str, list[SymbolLocation]] = {}
         self.references: dict[str, list[SymbolReference]] = {}
         self.call_edges: list[CallEdge] = []
@@ -476,7 +483,7 @@ class SemanticIndex:
             if not path.is_file() or path.suffix.lower() not in self.settings.allowed_extension_set:
                 continue
             rel_path = path.relative_to(self.root_dir)
-            if any(part in self.settings.excluded_dir_set for part in rel_path.parts):
+            if self.path_excluder.is_excluded(rel_path):
                 continue
             try:
                 if path.stat().st_size > max_bytes:

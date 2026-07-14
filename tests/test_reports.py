@@ -180,3 +180,19 @@ def test_report_page_and_page_size_limit(client):
     assert canonical_api.json()["overview"]["task_id"] == str(task.id)
     assert client.get("/demo-c/missing_vs_master.html").status_code == 404
     assert client.get(f"/api/reports/tasks/{task.id}", params={"page_size": 301}).status_code == 422
+
+
+def test_report_frontend_has_no_external_css_or_javascript(client):
+    _create_report_data()
+    page = client.get("/demo-c/feature_vs_master.html")
+
+    assert page.status_code == 200
+    assert 'href="/static/report.css"' in page.text
+    assert 'src="/static/report.js"' in page.text
+    assert "https://" not in page.text
+    assert "http://" not in page.text
+    for asset_path in ["/static/report.css", "/static/report.js"]:
+        asset = client.get(asset_path)
+        assert asset.status_code == 200
+        assert "https://" not in asset.text
+        assert "http://" not in asset.text
