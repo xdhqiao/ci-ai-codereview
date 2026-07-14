@@ -13,3 +13,5 @@ dist/
 build/
 mongo-data/
 data/
+artifacts/
+demo_repos/.e2e_runtime/

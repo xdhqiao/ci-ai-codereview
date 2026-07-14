@@ -12,10 +12,11 @@ from app.services.scheduler import ReviewScheduler
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     settings = get_settings()
     connect_to_mongo(settings)
     scheduler = ReviewScheduler(settings)
+    app.state.review_scheduler = scheduler
     if settings.app_enable_scheduler:
         scheduler.start()
     try:

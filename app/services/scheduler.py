@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Event
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from mongoengine.queryset.visitor import Q
 
 from app.core.config import Settings, get_settings
 from app.models.task import TaskModel
@@ -36,7 +37,7 @@ class ReviewScheduler:
         if self.scheduler.running:
             return
         self.scheduler.add_job(
-            self._poll,
+            self._safe_poll,
             "interval",
             seconds=max(1, self.settings.scheduler_interval_seconds),
             next_run_time=utc_now(),
@@ -56,21 +57,52 @@ class ReviewScheduler:
     async def run_once(self) -> None:
         await self._poll()
 
+    def status(self) -> dict[str, object]:
+        job = self.scheduler.get_job("code-review-task-dispatcher") if self.scheduler.running else None
+        next_run_time = getattr(job, "next_run_time", None)
+        return {
+            "enabled": True,
+            "running": self.scheduler.running,
+            "active_task_id": self._active_task_id,
+            "active_task_type": self._active_task_type,
+            "active_future_present": self._active_future is not None,
+            "active_future_done": self._active_future.done() if self._active_future is not None else None,
+            "active_lease_present": bool(self._active_lease_token),
+            "stop_requested": bool(self._stop_event and self._stop_event.is_set()),
+            "next_run_time": next_run_time.isoformat() if next_run_time else None,
+        }
+
+    async def _safe_poll(self) -> None:
+        try:
+            await self._poll()
+        except Exception:
+            logger.exception("Review scheduler poll failed; the next interval will retry")
+
     async def _poll(self) -> None:
         if self._active_future is not None:
             if not self._active_future.done():
-                await asyncio.to_thread(self._heartbeat)
-                if self._active_task_type == TASK_TYPE_FULL_SCAN:
-                    incremental_waiting = await asyncio.to_thread(self._has_waiting_incremental)
-                    if incremental_waiting and self._stop_event is not None:
-                        logger.info("Preempting full scan task %s for an incremental task", self._active_task_id)
-                        self._stop_event.set()
-                return
-            try:
-                self._active_future.result()
-            except Exception:
-                logger.exception("Review worker failed for task %s", self._active_task_id)
-            self._clear_active()
+                if await asyncio.to_thread(self._active_task_released_checkpoint):
+                    detached = self._active_future
+                    detached.add_done_callback(self._consume_detached_future)
+                    logger.warning(
+                        "Releasing scheduler slot for task %s after its database checkpoint released the lease",
+                        self._active_task_id,
+                    )
+                    self._clear_active()
+                else:
+                    await asyncio.to_thread(self._heartbeat)
+                    if self._active_task_type == TASK_TYPE_FULL_SCAN:
+                        incremental_waiting = await asyncio.to_thread(self._has_waiting_incremental)
+                        if incremental_waiting and self._stop_event is not None:
+                            logger.info("Preempting full scan task %s for an incremental task", self._active_task_id)
+                            self._stop_event.set()
+                    return
+            else:
+                try:
+                    self._active_future.result()
+                except Exception:
+                    logger.exception("Review worker failed for task %s", self._active_task_id)
+                self._clear_active()
 
         task = await asyncio.to_thread(self.claim_next_task)
         if task is None:
@@ -99,12 +131,16 @@ class ReviewScheduler:
             if not self._eligible(candidate, now):
                 continue
             lease_token = str(uuid.uuid4())
-            claimed = TaskModel.objects(
+            claim_query = Q(
                 id=candidate.id,
                 state=candidate.state,
                 trigger_revision=candidate.trigger_revision,
-                lease_token=candidate.lease_token,
-            ).modify(
+            )
+            if candidate.lease_token:
+                claim_query &= Q(lease_token=candidate.lease_token)
+            else:
+                claim_query &= (Q(lease_token="") | Q(lease_token__exists=False))
+            claimed = TaskModel.objects(claim_query).modify(
                 new=True,
                 set__state=1,
                 set__completion_status="running",
@@ -143,6 +179,25 @@ class ReviewScheduler:
             set__update_time=now,
         )
 
+    def _active_task_released_checkpoint(self) -> bool:
+        if not self._active_task_id or not self._active_lease_token:
+            return False
+        task = TaskModel.objects(id=self._active_task_id).only(
+            "state",
+            "completion_status",
+            "lease_token",
+        ).first()
+        if task is None:
+            return True
+        if task.lease_token == self._active_lease_token:
+            return False
+        return task.state in {0, 2, 3} or task.completion_status in {
+            "completed",
+            "failed",
+            "interrupted",
+            "partial",
+        }
+
     def _has_waiting_incremental(self) -> bool:
         now = utc_now()
         for task in TaskModel.objects(task_type=TASK_TYPE_INCREMENTAL).order_by("create_time"):
@@ -156,6 +211,15 @@ class ReviewScheduler:
         self._active_task_type = 0
         self._active_lease_token = ""
         self._stop_event = None
+
+    @staticmethod
+    def _consume_detached_future(future: asyncio.Future[None]) -> None:
+        try:
+            future.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Detached review worker failed after releasing its scheduler slot")
 
     @staticmethod
     def _is_expired(value: datetime, now: datetime) -> bool:
