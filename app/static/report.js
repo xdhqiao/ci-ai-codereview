@@ -5,6 +5,9 @@ const state = {
   pageSize: 300,
   rejectTarget: null,
   scoreDimensions: null,
+  taskId: '',
+  loading: false,
+  refreshTimer: null,
 };
 
 const labels = {
@@ -27,33 +30,45 @@ const duration = (milliseconds) => {
 };
 const dateTime = (value) => value ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(value)) : '--';
 
-async function loadReport() {
-  $('#loading').hidden = false;
+async function loadReport({ silent = false } = {}) {
+  if (state.loading) return;
+  state.loading = true;
+  if (!silent) $('#loading').hidden = false;
   $('#error-state').hidden = true;
   const params = new URLSearchParams({ page: state.page, page_size: state.pageSize });
   if (state.author) params.set('author', state.author);
   try {
-    const response = await fetch(`${state.reportEndpoint}?${params}`);
+    const response = await fetch(`${state.reportEndpoint}?${params}`, { cache: 'no-store' });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       throw new Error(body.error?.message || `HTTP ${response.status}`);
     }
     const report = await response.json();
+    state.taskId = report.overview.task_id;
     state.author = report.selected_author;
     state.page = report.pagination.page;
     renderReport(report);
     $('#report-root').hidden = false;
+    scheduleRefresh(report);
   } catch (error) {
-    $('#report-root').hidden = true;
-    $('#error-message').textContent = error.message;
-    $('#error-state').hidden = false;
+    if (silent && !$('#report-root').hidden) {
+      showToast(`进度刷新失败：${error.message}`);
+      clearTimeout(state.refreshTimer);
+      state.refreshTimer = setTimeout(() => loadReport({ silent: true }), 5000);
+    } else {
+      $('#report-root').hidden = true;
+      $('#error-message').textContent = error.message;
+      $('#error-state').hidden = false;
+    }
   } finally {
-    $('#loading').hidden = true;
+    if (!silent) $('#loading').hidden = true;
+    state.loading = false;
   }
 }
 
 function renderReport(report) {
-  renderOverview(report.overview);
+  renderOverview(report.overview, report.progress);
+  renderProgress(report.progress, report.overview);
   renderScores(report.overview);
   renderMetrics(report.metrics);
   renderAuthors(report.authors, report.selected_author);
@@ -63,11 +78,28 @@ function renderReport(report) {
   renderPagination($('#pagination-bottom'), report.pagination);
 }
 
-function renderOverview(overview) {
+function scheduleRefresh(report) {
+  clearTimeout(state.refreshTimer);
+  const activeState = [0, 1, 4].includes(report.overview.state);
+  const waitingForAutomaticRetry = Boolean(report.progress.next_retry_time);
+  if (!activeState && !waitingForAutomaticRetry && !report.progress.retry_in_progress) return;
+  const seconds = Math.max(2, report.progress.auto_refresh_seconds || 5);
+  state.refreshTimer = setTimeout(() => loadReport({ silent: true }), seconds * 1000);
+}
+
+function renderOverview(overview, progress) {
   $('#project-title').textContent = `${overview.project_id} 审核报告`;
   const status = $('#task-state');
-  status.textContent = overview.completion_status === 'completed' ? '审核完成' : (overview.completion_status || `状态 ${overview.state}`);
-  status.classList.toggle('partial', overview.completion_status !== 'completed');
+  const statusNames = {
+    pending: '等待审核', running: '审核中', completed: '审核完成', partial: '部分失败', failed: '审核失败',
+    interrupted: '等待恢复', preparing: '正在准备', retry_pending: '续审排队中', retry_running: '失败项续审中',
+  };
+  const hasUnreviewedBlocks = progress.pending_block_num > 0 || progress.reviewing_block_num > 0;
+  status.textContent = hasUnreviewedBlocks
+    ? '审核中'
+    : (statusNames[overview.completion_status] || overview.completion_status || `状态 ${overview.state}`);
+  status.classList.toggle('partial', overview.state !== 2 || hasUnreviewedBlocks);
+  status.classList.toggle('failed', ['partial', 'failed'].includes(overview.completion_status));
   const values = [
     ['审核项目', overview.project_id],
     ['审核版本', overview.review_version],
@@ -85,6 +117,46 @@ function renderOverview(overview) {
     dl.append(dt, dd);
     return dl;
   }));
+}
+
+function renderProgress(progress, overview) {
+  $('#progress-percentage').textContent = `${progress.percentage}%`;
+  $('#progress-fill').style.width = `${progress.percentage}%`;
+  const track = $('.progress-track');
+  track.setAttribute('aria-valuenow', String(progress.percentage));
+  const values = [
+    `文件：${number(progress.completed_file_num)} 完成 / ${number(progress.reviewing_file_num)} 审核中 / ${number(progress.pending_file_num)} 待处理 / ${number(progress.failed_file_num)} 失败`,
+    `Block：${number(progress.completed_block_num)} 完成 / ${number(progress.reviewing_block_num)} 审核中 / ${number(progress.pending_block_num)} 待处理 / ${number(progress.failed_block_num)} 失败`,
+  ];
+  $('#progress-details').replaceChildren(...values.map((value) => {
+    const span = document.createElement('span'); span.textContent = value; return span;
+  }));
+
+  const retryButton = $('#retry-failures-button');
+  retryButton.hidden = false;
+  retryButton.disabled = true;
+  if (progress.retry_in_progress) {
+    retryButton.textContent = '失败项重新审核中';
+  } else if (progress.retry_available) {
+    retryButton.disabled = false;
+    retryButton.textContent = `重新审核失败项（${progress.retryable_block_num}）`;
+  } else if (progress.percentage >= 100) {
+    retryButton.textContent = '审核已完成';
+  } else if (progress.pending_block_num > 0 || progress.reviewing_block_num > 0) {
+    retryButton.textContent = '审核进行中';
+  } else {
+    retryButton.textContent = '暂无可重新审核项';
+  }
+  const retryStatus = $('#retry-status');
+  const messages = [];
+  if (progress.retry_in_progress) messages.push('人工续审已进入最高优先级队列，已完成 Block 会直接复用。');
+  if (progress.pending_block_num > 0 || progress.reviewing_block_num > 0) {
+    messages.push(`仍有 ${number(progress.pending_block_num)} 个待审、${number(progress.reviewing_block_num)} 个审核中 Block，完成后才能重新审核失败项。`);
+  }
+  if (progress.next_retry_time && overview.state === 3) messages.push(`自动重试时间：${dateTime(progress.next_retry_time)}`);
+  if (progress.manual_retry_count) messages.push(`已人工续审 ${number(progress.manual_retry_count)} 次。`);
+  retryStatus.textContent = messages.join(' ');
+  retryStatus.hidden = messages.length === 0;
 }
 
 function renderScores(overview) {
@@ -224,6 +296,7 @@ function renderFile(file) {
   title.className = 'file-title';
   const heading = document.createElement('h3'); heading.textContent = file.file_name;
   title.append(heading);
+  title.append(reviewStatus(file.status));
   if (file.file_author) {
     const author = document.createElement('span'); author.className = 'file-author'; author.textContent = `负责人：${file.file_author}`; title.append(author);
   }
@@ -242,8 +315,8 @@ function renderBlock(file, block) {
   const section = document.createElement('section'); section.className = 'block-review';
   const heading = document.createElement('div'); heading.className = 'block-heading';
   const name = document.createElement('strong'); name.textContent = `Block ${block.block_id}`;
-  const stats = document.createElement('span'); stats.textContent = `评分 ${block.overall_score} · 变更 ${block.changed_line_num} 行`;
-  heading.append(name, stats);
+  const stats = document.createElement('span'); stats.textContent = `评分 ${block.overall_score} · 变更 ${block.changed_line_num} 行 · 耗时 ${duration(block.process_time_ms)}`;
+  heading.append(name, reviewStatus(block.status), stats);
   const code = document.createElement('div'); code.className = 'code-panel';
   const pre = document.createElement('pre');
   block.contents.forEach((line) => {
@@ -253,6 +326,7 @@ function renderBlock(file, block) {
     pre.append(span);
   });
   code.append(pre);
+  const failure = document.createElement('p'); failure.className = 'block-failure'; failure.textContent = block.failure_message || '';
   const comment = document.createElement('div'); comment.className = 'block-comment';
   const commentTitle = document.createElement('strong'); commentTitle.textContent = '总体评论';
   const commentText = document.createElement('p'); commentText.textContent = block.comment || '无';
@@ -260,8 +334,18 @@ function renderBlock(file, block) {
   const issues = document.createElement('div'); issues.className = 'issue-list';
   if (block.issues.length) issues.append(...block.issues.map((issue) => renderIssue(file, block, issue)));
   else { const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = '该 Block 没有有效审核问题。'; issues.append(empty); }
-  section.append(heading, code, comment, issues);
+  section.append(heading, code);
+  if (block.failure_message) section.append(failure);
+  section.append(comment, issues);
   return section;
+}
+
+function reviewStatus(status) {
+  const names = { completed: '已完成', reviewing: '审核中', pending: '待处理', failed: '失败' };
+  const badge = document.createElement('span');
+  badge.className = `review-status ${status}`;
+  badge.textContent = names[status] || status;
+  return badge;
 }
 
 function renderIssue(file, block, issue) {
@@ -349,6 +433,24 @@ function pageButton(label, page, disabled, active = false) {
   return button;
 }
 
+async function retryFailedBlocks() {
+  const button = $('#retry-failures-button');
+  button.disabled = true;
+  button.textContent = '正在提交续审...';
+  try {
+    const response = await fetch(`/tasks/${encodeURIComponent(state.taskId)}/retry-failures`, { method: 'POST' });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error?.message || `HTTP ${response.status}`);
+    }
+    showToast('失败项已进入最高优先级重新审核队列');
+    await loadReport({ silent: true });
+  } catch (error) {
+    showToast(`续审提交失败：${error.message}`);
+    button.disabled = false;
+  }
+}
+
 let toastTimer;
 function showToast(message) {
   const toast = $('#toast'); toast.textContent = message; toast.hidden = false;
@@ -357,6 +459,7 @@ function showToast(message) {
 
 $('#author-select').addEventListener('change', (event) => { state.author = event.target.value; state.page = 1; loadReport(); });
 $('#retry-button').addEventListener('click', loadReport);
+$('#retry-failures-button').addEventListener('click', retryFailedBlocks);
 $('#reject-cancel').addEventListener('click', () => $('#reject-dialog').close());
 $('#reject-close').addEventListener('click', () => $('#reject-dialog').close());
 $('#reject-form').addEventListener('submit', async (event) => {

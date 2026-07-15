@@ -16,6 +16,8 @@
 | `SCHEDULER_INTERVAL_SECONDS` | `5` | 待审任务扫描与运行中任务心跳间隔。建议 3～10 秒。 |
 | `SCHEDULER_LEASE_SECONDS` | `120` | worker 任务租约时长。应明显大于扫描间隔；建议为扫描间隔的 10 倍以上。服务异常退出后，其他实例会在租约过期后恢复任务。 |
 | `SCHEDULER_MAX_TASK_RETRIES` | `3` | partial/failed 任务自动重试上限。持续失败达到上限后保留状态与诊断数据，等待人工处理或再次触发。 |
+| `SCHEDULER_RETRY_BACKOFF_SECONDS` | `30` | 自动重试的初始等待时间，单位秒。第 1、2、3 次失败后默认等待 30、60、120 秒，避免模型服务异常时连续请求。 |
+| `SCHEDULER_RETRY_BACKOFF_MAX_SECONDS` | `900` | 自动重试退避上限，单位秒。建议 300～1800。人工点击续审不受该等待时间限制。 |
 
 ## 2. MongoDB 配置
 
@@ -72,14 +74,16 @@
 
 | 参数 | 默认值 | 含义与建议 |
 |---|---:|---|
-| `DIFF_TOKEN_THRESHOLD` | `10000` | 单个 CodeBlock 的近似 token 上限，超过后按行拆块。建议 8000～12000。 |
+| `DIFF_TOKEN_THRESHOLD` | `10000` | 单个 CodeBlock 的近似 token 上限，超过后按行拆块。C/C++ 项目建议 8000～12000；默认 10000。 |
 | `DIFF_CONTEXT_LINES` | `10` | 每个变更周围保留的上下文行数。建议 8～15。 |
 | `CODE_REPOSITORY_ROOT` | 空 | 本地代码仓库总根目录，例如 `D:/codereview`。生产必须明确设置或使用 Task `parent_path`。 |
 | `REVIEW_EXCLUDE_DIRS` | 多个目录 | 逗号分隔的排除目录。建议排除依赖、构建产物、缓存和生成目录。 |
 | `REVIEW_EXCLUDE_PATHS` | 业务默认列表 | 逗号分隔、大小写不敏感；相对文件路径包含任意元素即排除。会与 `ProjectModel.exclude_path` 合并，被排除文件不会进入 `CodeFileModel`。 |
 | `REVIEW_ALLOWED_EXTENSIONS` | 多语言扩展名集合 | 允许审核的扩展名；存在于代码默认值，但当前未写入 `.env.example` 和 Compose。 |
 
-`DIFF_TOKEN_THRESHOLD` 太小会拆散逻辑单元，太大会造成 prompt 过长。当前 10000 是较稳妥的折中值。
+`DIFF_TOKEN_THRESHOLD` 太小会拆散函数和数据流，太大会造成 prompt 过长。当前 10000 并不偏小：plan/main 除 Block 外还会携带完整目标文件、规则、Background、相关文件和工具历史。在 `LLM_MAX_CONTEXT_TOKENS=58888` 下建议保持 10000；函数普遍很长且模型窗口至少 64k 时可试 12000，不建议直接提高到 20000。修改方式是在 `.env` 或进程环境变量中设置，例如 `DIFF_TOKEN_THRESHOLD=12000`，然后重启服务；Compose 用户执行 `docker compose up -d --build` 使新环境生效。
+
+该值是基于字符数的近似 token 预算，不是 tokenizer 的精确计数。小于阈值的单文件 diff/全量代码保持一个 Block；超过阈值才拆分。多行注释状态会跨拆分边界传递，纯注释 Block 不会因为恰好从 `/* ... */` 中间拆开而误触发 LLM。
 
 ## 7. 全量扫描与批次
 
@@ -199,6 +203,8 @@ APP_ENABLE_SCHEDULER=true
 SCHEDULER_INTERVAL_SECONDS=5
 SCHEDULER_LEASE_SECONDS=120
 SCHEDULER_MAX_TASK_RETRIES=3
+SCHEDULER_RETRY_BACKOFF_SECONDS=30
+SCHEDULER_RETRY_BACKOFF_MAX_SECONDS=900
 
 MONGODB_URI=mongodb://user:password@mongodb:27017/ci_ai_codereview?authSource=admin
 MONGODB_DB=ci_ai_codereview

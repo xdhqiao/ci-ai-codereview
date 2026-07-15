@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from mongoengine import ValidationError
 
@@ -18,6 +19,7 @@ from app.schemas.report import (
     ReportMetricsResponse,
     ReportOverviewResponse,
     ReportPaginationResponse,
+    ReportProgressResponse,
     ScoreResponse,
     TaskReportResponse,
 )
@@ -134,6 +136,7 @@ class TaskReportService:
             for code_file in all_files
             for block in code_file.code_blocks
         )
+        progress = self._progress_response(task, all_files)
 
         return TaskReportResponse(
             overview=ReportOverviewResponse(
@@ -147,7 +150,7 @@ class TaskReportService:
                 completion_status=task.completion_status or "",
                 create_time=task.create_time,
                 update_time=task.update_time,
-                process_time_ms=task.process_time or 0,
+                process_time_ms=self._live_process_time(task),
                 changed_line_num=changed_line_num,
                 added_line_num=sum(code_file.add_code_line_num or 0 for code_file in all_files),
                 overall_score=self._overall_score(task_scores.scores),
@@ -159,7 +162,7 @@ class TaskReportService:
                 completion_tokens=task.llm_completion_tokens or 0,
                 llm_elapsed_ms=task.llm_elapsed_ms or 0,
                 file_num=len(all_files),
-                reviewed_file_num=task.reviewed_file_num or 0,
+                reviewed_file_num=progress.completed_file_num,
                 code_block_num=sum(len(code_file.code_blocks) for code_file in all_files),
                 issue_num=len(valid_issues),
                 filtered_issue_num=filtered_issue_num,
@@ -167,8 +170,9 @@ class TaskReportService:
                 tool_call_num=tool_call_num,
                 model_round_num=model_round_num,
                 memory_compression_num=memory_compression_num,
-                incomplete_file_num=task.incomplete_file_num or 0,
+                incomplete_file_num=progress.failed_file_num,
             ),
+            progress=progress,
             authors=authors,
             selected_author=selected_author,
             highest_severity=highest_severity,
@@ -225,21 +229,37 @@ class TaskReportService:
 
     def _file_response(self, code_file: CodeFileModel, task_type: int) -> ReportFileResponse:
         weighted = self._weighted_scores([code_file], task_type)
+        block_statuses = [self._block_status(block, code_file) for block in code_file.code_blocks]
         return ReportFileResponse(
             file_id=str(code_file.id),
             file_name=code_file.file_name,
             file_author=(code_file.file_author or "").strip(),
+            review_state=code_file.state or 0,
+            status=self._file_status(code_file),
+            completed_block_num=sum(1 for status in block_statuses if status == "completed"),
+            failed_block_num=sum(1 for status in block_statuses if status == "failed"),
             changed_line_num=weighted.weight,
             added_line_num=code_file.add_code_line_num or 0,
             overall_score=self._overall_score(weighted.scores),
             scores=ScoreResponse(**weighted.scores),
-            blocks=[self._block_response(block, task_type) for block in code_file.code_blocks],
+            blocks=[self._block_response(block, task_type, code_file) for block in code_file.code_blocks],
         )
 
-    def _block_response(self, block: CodeBlock, task_type: int) -> ReportBlockResponse:
+    def _block_response(
+        self,
+        block: CodeBlock,
+        task_type: int,
+        code_file: CodeFileModel | None = None,
+    ) -> ReportBlockResponse:
         scores = {field: self._bounded_score(getattr(block, field, 0)) for field in SCORE_FIELDS}
         return ReportBlockResponse(
             block_id=block.block_id,
+            review_state=block.review_state or 0,
+            status=self._block_status(block, code_file),
+            process_time_ms=block.process_time or 0,
+            main_task_completed=bool(block.main_task_completed),
+            completion_mode=block.main_task_completion_mode or "",
+            failure_message=block.failure_message or "",
             changed_line_num=self._block_weight(block, task_type),
             overall_score=self._overall_score(scores),
             scores=ScoreResponse(**scores),
@@ -247,6 +267,94 @@ class TaskReportService:
             comment=block.comment or "",
             issues=[self._issue_response(issue) for issue in block.issues if self._is_reportable_issue(issue)],
         )
+
+    def _progress_response(
+        self,
+        task: TaskModel,
+        code_files: list[CodeFileModel],
+    ) -> ReportProgressResponse:
+        block_statuses_by_file = [
+            (code_file, [self._block_status(block, code_file) for block in code_file.code_blocks])
+            for code_file in code_files
+        ]
+        file_statuses = [self._file_status(code_file) for code_file in code_files]
+        block_statuses = [status for _, statuses in block_statuses_by_file for status in statuses]
+        completed_blocks = block_statuses.count("completed")
+        reviewing_blocks = block_statuses.count("reviewing")
+        pending_blocks = block_statuses.count("pending")
+        failed_blocks = block_statuses.count("failed")
+        total_blocks = len(block_statuses)
+        if total_blocks:
+            percentage = round(completed_blocks * 100 / total_blocks)
+        elif code_files:
+            percentage = round(file_statuses.count("completed") * 100 / len(code_files))
+        else:
+            percentage = 0
+        retry_in_progress = bool(task.retry_failed_only) and task.state in {0, 1}
+        retryable_file_num = sum(1 for _, statuses in block_statuses_by_file if "failed" in statuses)
+        retry_available = (
+            percentage < 100
+            and failed_blocks > 0
+            and pending_blocks == 0
+            and reviewing_blocks == 0
+            and task.state == 3
+            and not retry_in_progress
+        )
+        return ReportProgressResponse(
+            percentage=min(100, max(0, percentage)),
+            total_file_num=len(code_files),
+            completed_file_num=file_statuses.count("completed"),
+            reviewing_file_num=file_statuses.count("reviewing"),
+            pending_file_num=file_statuses.count("pending"),
+            failed_file_num=file_statuses.count("failed"),
+            total_block_num=total_blocks,
+            completed_block_num=completed_blocks,
+            reviewing_block_num=reviewing_blocks,
+            pending_block_num=pending_blocks,
+            failed_block_num=failed_blocks,
+            retryable_file_num=retryable_file_num,
+            retryable_block_num=failed_blocks,
+            retry_available=retry_available,
+            retry_in_progress=retry_in_progress,
+            manual_retry_count=task.manual_retry_count or 0,
+            next_retry_time=task.next_retry_time,
+            auto_refresh_seconds=5,
+        )
+
+    def _file_status(self, code_file: CodeFileModel) -> str:
+        statuses = [self._block_status(block, code_file) for block in code_file.code_blocks]
+        extra_status = str((code_file.extra or {}).get("status") or "")
+        if extra_status == "skipped_budget":
+            return "failed"
+        if statuses and all(status == "completed" for status in statuses):
+            return "completed"
+        if code_file.state == 1 or "reviewing" in statuses:
+            return "reviewing"
+        if code_file.state == 3 or "failed" in statuses or extra_status == "partial":
+            return "failed"
+        return "pending"
+
+    def _block_status(self, block: CodeBlock, code_file: CodeFileModel | None = None) -> str:
+        if block.failure_message or block.review_state == 3:
+            return "failed"
+        if block.main_task_completed or block.review_state == 2:
+            return "completed"
+        if code_file is not None:
+            file_status = str((code_file.extra or {}).get("status") or "")
+            if code_file.state == 2 or file_status in {"reviewed", "resumed"}:
+                return "completed"
+        if block.review_state == 1:
+            return "reviewing"
+        return "pending"
+
+    def _live_process_time(self, task: TaskModel) -> int:
+        process_time = int(task.process_time or 0)
+        if task.state != 1 or task.last_start_time is None:
+            return process_time
+        started = task.last_start_time
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return process_time + max(0, int((datetime.now(timezone.utc) - started).total_seconds() * 1000))
 
     def _issue_response(self, issue: Issue) -> ReportIssueResponse:
         return ReportIssueResponse(

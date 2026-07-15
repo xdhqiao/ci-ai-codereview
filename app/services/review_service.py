@@ -16,6 +16,7 @@ from app.core.exceptions import NotFoundError, ReviewInterruptedError
 from app.models.code_file import CodeBlock, CodeFileModel, Issue, ModelRoundTrace, ToolCallTrace
 from app.models.task import TaskModel
 from app.services.background import FileBackgroundProvider, FileReviewBackground, MockFileBackgroundProvider
+from app.services.comment_filter import comment_only_block_flags
 from app.services.diff_service import (
     TASK_TYPE_FULL_SCAN,
     TASK_TYPE_INCREMENTAL,
@@ -42,13 +43,14 @@ from app.services.related_files import RelatedFile, RelatedFileResolver
 from app.services.rules import review_rules_for
 from app.services.semantic_index import SemanticIndex
 from app.services.static_analysis import SarifFindingLoader, StaticFinding
+from app.services.task_retry import automatic_retry_time
 from app.services.task_submission import TaskFileSynchronizer, code_block_hash, review_target_hash
 
 
 SCORE_FIELDS = ["logic_score", "performance_score", "security_score", "readable_score", "code_style_score"]
 TASK_STATE_COMPLETED = 2
 TASK_STATE_PARTIAL = 3
-REVIEW_PIPELINE_VERSION = "2026-07-12-ocr-accuracy-v5-background-semantic-index"
+REVIEW_PIPELINE_VERSION = "2026-07-15-ocr-accuracy-v6-comment-filter"
 
 
 def utc_now() -> datetime:
@@ -168,7 +170,9 @@ class ReviewTaskService:
         self.diff_service.set_project_exclude_paths(self.project_exclude_paths)
         self._initialize_usage(task)
         task.state = 1
-        task.completion_status = "running"
+        task.completion_status = "retry_running" if task.retry_failed_only else "running"
+        task.automatic_retry_pending = False
+        task.next_retry_time = None
         task.last_start_time = utc_now()
         task.interrupt_requested = False
         task.update_time = utc_now()
@@ -178,7 +182,22 @@ class ReviewTaskService:
             self._check_interrupted()
             review_context, review_root = self._collect_targets(task)
             self.review_context = review_context
-            TaskFileSynchronizer(self.diff_service).synchronize(task, review_context)
+            if task.retry_failed_only:
+                retry_file_names = self._retry_failed_file_names(task)
+                retry_targets = [target for target in review_context.targets if target.file_name in retry_file_names]
+                retry_context = ReviewCollection(
+                    targets=retry_targets,
+                    diff_map=review_context.diff_map,
+                    changed_files=review_context.changed_files,
+                )
+                TaskFileSynchronizer(self.diff_service).synchronize(
+                    task,
+                    retry_context,
+                    preserve_stale=True,
+                )
+            else:
+                retry_targets = review_context.targets
+                TaskFileSynchronizer(self.diff_service).synchronize(task, review_context)
             self.rule_settings = self._resolve_rule_settings(review_root)
             self.semantic_index = (
                 SemanticIndex(review_root, self.settings, self.project_exclude_paths)
@@ -186,9 +205,11 @@ class ReviewTaskService:
                 else None
             )
             self.static_findings_by_file = SarifFindingLoader(self.settings).load(review_root)
-            targets = review_context.targets
+            targets = retry_targets
             self._check_interrupted()
             saved_files = self._review_targets(task, targets, review_root)
+            if task.retry_failed_only:
+                saved_files = list(CodeFileModel.objects(task_id=str(task.id)))
 
             self._check_interrupted()
             self._finish_task(task, saved_files, started_at)
@@ -198,12 +219,16 @@ class ReviewTaskService:
                 task.save()
             return task
         except ReviewInterruptedError:
-            self._mark_task_interrupted(task)
+            self._mark_task_interrupted(task, started_at)
             return TaskModel.objects(id=task.id).first() or task
         except Exception as exc:
             task.retry_count = (task.retry_count or 0) + 1
             task.state = TASK_STATE_PARTIAL
             task.completion_status = "failed"
+            task.dispatch_priority = 0
+            task.retry_failed_only = False
+            task.next_retry_time = automatic_retry_time(task, self.settings)
+            task.automatic_retry_pending = task.next_retry_time is not None
             task.developer_issue_summary = {
                 **(task.developer_issue_summary or {}),
                 "_fatal_error": {
@@ -212,6 +237,8 @@ class ReviewTaskService:
                 },
             }
             task.task_model_rounds = self.task_model_rounds
+            self._apply_usage_totals(task)
+            task.process_time = self._initial_usage["process_time"] + int((time.monotonic() - started_at) * 1000)
             task.lease_owner = ""
             task.lease_token = ""
             task.lease_expires_at = None
@@ -251,6 +278,14 @@ class ReviewTaskService:
         if copy_from_version in {"", "0", "0_version"}:
             return TASK_TYPE_FULL_SCAN
         return TASK_TYPE_INCREMENTAL
+
+    @staticmethod
+    def _retry_failed_file_names(task: TaskModel) -> set[str]:
+        return {
+            code_file.file_name
+            for code_file in CodeFileModel.objects(task_id=str(task.id)).only("file_name", "code_blocks")
+            if any(block.failure_message or block.review_state == 3 for block in code_file.code_blocks)
+        }
 
     def _review_targets(self, task: TaskModel, targets: list[ReviewTarget], review_root: Path) -> list[CodeFileModel]:
         if not targets:
@@ -708,6 +743,68 @@ class ReviewTaskService:
                 counts = self._run_usage["tool_calls"]
                 counts[trace.tool_name] = counts.get(trace.tool_name, 0) + 1
 
+    def _usage_totals(self) -> dict[str, Any]:
+        task_round_usage = self._summarize_model_round_tokens(self.task_model_rounds)
+        with self._usage_lock:
+            run_usage = {
+                **self._run_usage,
+                "tool_calls": dict(self._run_usage.get("tool_calls") or {}),
+            }
+        tool_call_summary: dict[str, int] = dict(self._initial_usage.get("tool_calls") or {})
+        for tool_name, count in run_usage["tool_calls"].items():
+            tool_call_summary[tool_name] = tool_call_summary.get(tool_name, 0) + count
+        return {
+            "prompt_tokens": self._initial_usage["prompt_tokens"] + run_usage["prompt_tokens"] + task_round_usage["prompt_tokens"],
+            "completion_tokens": self._initial_usage["completion_tokens"] + run_usage["completion_tokens"] + task_round_usage["completion_tokens"],
+            "total_tokens": self._initial_usage["total_tokens"] + run_usage["total_tokens"] + task_round_usage["total_tokens"],
+            "elapsed_ms": self._initial_usage["elapsed_ms"] + run_usage["elapsed_ms"] + task_round_usage["elapsed_ms"],
+            "call_count": self._initial_usage["call_count"] + run_usage["call_count"] + sum(
+                1 for trace in self.task_model_rounds if trace.model != "local"
+            ),
+            "tool_calls": tool_call_summary,
+        }
+
+    def _apply_usage_totals(self, task: TaskModel) -> None:
+        usage = self._usage_totals()
+        task.llm_prompt_tokens = usage["prompt_tokens"]
+        task.llm_completion_tokens = usage["completion_tokens"]
+        task.llm_total_tokens = usage["total_tokens"]
+        task.llm_elapsed_ms = usage["elapsed_ms"]
+        task.llm_call_count = usage["call_count"]
+        task.tool_call_summary = usage["tool_calls"]
+
+    def _checkpoint_task_usage(self, task: TaskModel) -> None:
+        usage = self._usage_totals()
+        TaskModel.objects(id=task.id).update_one(
+            set__llm_prompt_tokens=usage["prompt_tokens"],
+            set__llm_completion_tokens=usage["completion_tokens"],
+            set__llm_total_tokens=usage["total_tokens"],
+            set__llm_elapsed_ms=usage["elapsed_ms"],
+            set__llm_call_count=usage["call_count"],
+            set__tool_call_summary=usage["tool_calls"],
+            set__update_time=utc_now(),
+        )
+
+    def _checkpoint_task_progress(self, task: TaskModel) -> None:
+        code_files = list(CodeFileModel.objects(task_id=str(task.id)).only("state", "code_blocks", "extra"))
+        reviewed_file_num = sum(
+            1
+            for code_file in code_files
+            if code_file.state == 2 or (code_file.extra or {}).get("status") in {"reviewed", "resumed"}
+        )
+        incomplete_file_num = sum(
+            1
+            for code_file in code_files
+            if code_file.state == 3 or (code_file.extra or {}).get("status") in {"partial", "skipped_budget"}
+        )
+        TaskModel.objects(id=task.id).update_one(
+            set__file_num=len(code_files),
+            set__reviewed_file_num=reviewed_file_num,
+            set__incomplete_file_num=incomplete_file_num,
+            set__code_block_num=sum(len(code_file.code_blocks) for code_file in code_files),
+            set__update_time=utc_now(),
+        )
+
     def _check_interrupted(self) -> None:
         if self.stop_event is not None and self.stop_event.is_set():
             raise ReviewInterruptedError("Review preempted by a higher-priority task")
@@ -727,7 +824,7 @@ class ReviewTaskService:
         if self.lease_token and current.lease_token != self.lease_token:
             raise ReviewInterruptedError("Review task lease is no longer owned by this worker")
 
-    def _mark_task_interrupted(self, task: TaskModel) -> None:
+    def _mark_task_interrupted(self, task: TaskModel, started_at: float) -> None:
         current = TaskModel.objects(id=task.id).first()
         if current is None:
             return
@@ -742,6 +839,8 @@ class ReviewTaskService:
             current.state = 0
             current.completion_status = "interrupted"
             current.interrupt_requested = False
+            current.process_time = self._initial_usage["process_time"] + int((time.monotonic() - started_at) * 1000)
+            self._apply_usage_totals(current)
         current.update_time = utc_now()
         current.save()
         CodeFileModel.objects(task_id=str(task.id), state=1).update(
@@ -791,6 +890,7 @@ class ReviewTaskService:
         related_files = self._related_files(target)
         related_files_context = self._related_files_context(related_files)
         block_inputs = self.diff_service.split_code_blocks(target.diff_lines)
+        comment_only_flags = comment_only_block_flags(block_inputs, target.language)
         code_file = CodeFileModel.objects(task_id=str(task.id), file_name=target.file_name).first()
         if code_file is None:
             code_file = CodeFileModel(
@@ -830,9 +930,12 @@ class ReviewTaskService:
             existing_block = code_file.code_blocks[block_index]
             if (
                 existing_block.block_hash == block_digest
-                and existing_block.review_fingerprint == block_fingerprint
                 and existing_block.main_task_completed
                 and not existing_block.failure_message
+                and (
+                    task.retry_failed_only
+                    or existing_block.review_fingerprint == block_fingerprint
+                )
             ):
                 existing_block.block_id = block_index
                 existing_block.review_state = 2
@@ -844,6 +947,29 @@ class ReviewTaskService:
             existing_block.update_time = utc_now()
             code_file.code_blocks[block_index] = existing_block
             code_file.save()
+
+            if comment_only_flags[block_index]:
+                block = self._comment_only_block(
+                    block_id=block_index,
+                    block_hash=block_digest,
+                    review_fingerprint=block_fingerprint,
+                    contents=block_lines,
+                    review_attempt_count=existing_attempt_count + 1,
+                )
+                code_file.code_blocks[block_index] = block
+                code_file.extra = {
+                    **(code_file.extra or {}),
+                    "status": "reviewing",
+                    "completed_block_num": sum(
+                        1 for item in code_file.code_blocks if item.main_task_completed and not item.failure_message
+                    ),
+                    "comment_only_block_num": sum(
+                        1 for item in code_file.code_blocks if item.main_task_completion_mode == "comment_only"
+                    ),
+                }
+                code_file.update_time = utc_now()
+                code_file.save()
+                continue
 
             block_started_at = time.monotonic()
             static_findings = self._static_findings_for_block(target.file_name, block_lines)
@@ -972,6 +1098,7 @@ class ReviewTaskService:
             code_file.update_time = utc_now()
             code_file.save()
             self._accumulate_block_usage(model_rounds, tool_call_traces)
+            self._checkpoint_task_usage(task)
 
         code_blocks = list(code_file.code_blocks)
         self._merge_duplicate_file_issues(code_blocks)
@@ -1017,7 +1144,66 @@ class ReviewTaskService:
         code_file.update_time = utc_now()
         self._check_interrupted()
         code_file.save()
+        self._checkpoint_task_progress(task)
         return code_file
+
+    def _comment_only_block(
+        self,
+        *,
+        block_id: int,
+        block_hash: str,
+        review_fingerprint: str,
+        contents: list[str],
+        review_attempt_count: int,
+    ) -> CodeBlock:
+        comment = "代码变更仅包含注释或空白，按审核规则跳过 LLM 审核。"
+        trace = self._build_local_trace(
+            "comment_only_filter",
+            1,
+            {
+                "block_id": block_id,
+                "changed_line_num": sum(
+                    1 for line in contents if len(line) > 6 and line[6] in {"+", "-"}
+                ),
+            },
+            {"decision": "skip_llm", "scores": 100},
+        )
+        return CodeBlock(
+            block_id=block_id,
+            block_hash=block_hash,
+            review_fingerprint=review_fingerprint,
+            contents=list(contents),
+            comment=comment,
+            plan_change_summary="仅注释或空白变更",
+            plan_risk_level="low",
+            plan_checkpoints=[],
+            related_files=[],
+            static_findings=[],
+            logic_score=100,
+            performance_score=100,
+            security_score=100,
+            readable_score=100,
+            code_style_score=100,
+            comment_line_number=0,
+            issues=[],
+            process_time=0,
+            llm_prompt_tokens=0,
+            llm_completion_tokens=0,
+            llm_total_tokens=0,
+            llm_reasoning_tokens=0,
+            llm_cached_tokens=0,
+            llm_elapsed_ms=0,
+            memory_compression_count=0,
+            main_task_completed=True,
+            main_task_completion_mode="comment_only",
+            main_task_round_count=0,
+            model_rounds=[trace],
+            tool_calls=[],
+            failure_message="",
+            review_state=2,
+            review_attempt_count=review_attempt_count,
+            update_time=utc_now(),
+        )
 
     def _file_background(self, task: TaskModel, target: ReviewTarget) -> FileReviewBackground:
         cache_key = f"{task.project_id}\0{task.review_version}\0{target.file_name}"
@@ -2136,6 +2322,18 @@ class ReviewTaskService:
         task.completion_status = "completed" if not incomplete_files else "partial"
         if incomplete_files:
             task.retry_count = (task.retry_count or 0) + 1
+        task.dispatch_priority = 0
+        task.retry_failed_only = False
+        task.interrupt_requested = False
+        retryable_incomplete_files = [
+            code_file
+            for code_file in incomplete_files
+            if (code_file.extra or {}).get("status") == "partial"
+        ]
+        task.next_retry_time = (
+            automatic_retry_time(task, self.settings) if retryable_incomplete_files else None
+        )
+        task.automatic_retry_pending = task.next_retry_time is not None
         task.file_num = len(code_files)
         task.reviewed_file_num = sum(
             1
@@ -2158,35 +2356,7 @@ class ReviewTaskService:
             if (code_file.extra or {}).get("status") == "reviewed"
         )
         task.token_budget_num = self._effective_token_budget(task)
-        task_round_usage = self._summarize_model_round_tokens(self.task_model_rounds)
-        with self._usage_lock:
-            run_usage = {
-                **self._run_usage,
-                "tool_calls": dict(self._run_usage.get("tool_calls") or {}),
-            }
-        task.llm_prompt_tokens = (
-            self._initial_usage["prompt_tokens"] + run_usage["prompt_tokens"] + task_round_usage["prompt_tokens"]
-        )
-        task.llm_completion_tokens = (
-            self._initial_usage["completion_tokens"]
-            + run_usage["completion_tokens"]
-            + task_round_usage["completion_tokens"]
-        )
-        task.llm_total_tokens = (
-            self._initial_usage["total_tokens"] + run_usage["total_tokens"] + task_round_usage["total_tokens"]
-        )
-        task.llm_elapsed_ms = (
-            self._initial_usage["elapsed_ms"] + run_usage["elapsed_ms"] + task_round_usage["elapsed_ms"]
-        )
-        task.llm_call_count = (
-            self._initial_usage["call_count"]
-            + run_usage["call_count"]
-            + sum(1 for trace in self.task_model_rounds if trace.model != "local")
-        )
-        tool_call_summary: dict[str, int] = dict(self._initial_usage.get("tool_calls") or {})
-        for tool_name, count in run_usage["tool_calls"].items():
-            tool_call_summary[tool_name] = tool_call_summary.get(tool_name, 0) + count
-        task.tool_call_summary = tool_call_summary
+        self._apply_usage_totals(task)
         task.task_model_rounds = self.task_model_rounds
         task.project_summary = project_summary["summary"]
         static_sources: dict[str, int] = {}

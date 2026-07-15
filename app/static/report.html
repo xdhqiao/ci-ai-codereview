@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>代码审核报告</title>
-  <link rel="stylesheet" href="/static/report.css">
+  <link rel="stylesheet" href="/static/report.css?v=20260715-progress3">
 </head>
 <body>
   <header class="topbar">
@@ -21,6 +21,24 @@
     <section class="overview-band" aria-labelledby="overview-title">
       <h2 id="overview-title" class="section-title">审核概览</h2>
       <div class="overview-grid" id="overview-grid"></div>
+    </section>
+
+    <section class="progress-band" aria-labelledby="progress-title">
+      <div class="section-heading progress-heading">
+        <div>
+          <p class="eyebrow">LIVE PROGRESS</p>
+          <h2 id="progress-title" class="section-title">审核进度</h2>
+        </div>
+        <button id="retry-failures-button" class="button-primary" type="button" disabled>重新审核失败项</button>
+      </div>
+      <div class="progress-summary">
+        <strong id="progress-percentage">0%</strong>
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <span id="progress-fill"></span>
+        </div>
+      </div>
+      <div id="progress-details" class="progress-details"></div>
+      <p id="retry-status" class="retry-status muted" hidden></p>
     </section>
 
     <section class="score-band" aria-labelledby="score-title">
@@ -100,6 +118,6 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/static/report.js" defer></script>
+  <script src="/static/report.js?v=20260715-progress3" defer></script>
 </body>
 </html>

@@ -4,6 +4,7 @@ from app.core.exceptions import NotFoundError
 from app.models.task import TaskModel
 from app.schemas.task import JenkinsTaskTrigger, TaskCreate, TaskListResponse, TaskResponse
 from app.services.review_service import ReviewTaskService
+from app.services.task_retry import TaskRetryService
 from app.services.task_submission import TaskSubmissionService
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -65,4 +66,10 @@ def delete_task(task_id: str) -> None:
 @router.post("/{task_id}/review", response_model=TaskResponse)
 def run_task_review(task_id: str) -> TaskResponse:
     task = ReviewTaskService().review_existing_task(task_id)
+    return TaskResponse.from_model(task)
+
+
+@router.post("/{task_id}/retry-failures", response_model=TaskResponse, status_code=status.HTTP_202_ACCEPTED)
+def retry_failed_task_blocks(task_id: str) -> TaskResponse:
+    task = TaskRetryService().request_failed_retry(task_id)
     return TaskResponse.from_model(task)

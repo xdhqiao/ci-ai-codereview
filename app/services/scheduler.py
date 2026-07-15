@@ -30,6 +30,7 @@ class ReviewScheduler:
         self._active_future: asyncio.Task[None] | None = None
         self._active_task_id = ""
         self._active_task_type = 0
+        self._active_dispatch_priority = 0
         self._active_lease_token = ""
         self._stop_event: Event | None = None
 
@@ -65,6 +66,7 @@ class ReviewScheduler:
             "running": self.scheduler.running,
             "active_task_id": self._active_task_id,
             "active_task_type": self._active_task_type,
+            "active_dispatch_priority": self._active_dispatch_priority,
             "active_future_present": self._active_future is not None,
             "active_future_done": self._active_future.done() if self._active_future is not None else None,
             "active_lease_present": bool(self._active_lease_token),
@@ -91,11 +93,10 @@ class ReviewScheduler:
                     self._clear_active()
                 else:
                     await asyncio.to_thread(self._heartbeat)
-                    if self._active_task_type == TASK_TYPE_FULL_SCAN:
-                        incremental_waiting = await asyncio.to_thread(self._has_waiting_incremental)
-                        if incremental_waiting and self._stop_event is not None:
-                            logger.info("Preempting full scan task %s for an incremental task", self._active_task_id)
-                            self._stop_event.set()
+                    should_preempt = await asyncio.to_thread(self._has_higher_priority_task)
+                    if should_preempt and self._stop_event is not None:
+                        logger.info("Preempting task %s for a higher-priority task", self._active_task_id)
+                        self._stop_event.set()
                     return
             else:
                 try:
@@ -109,6 +110,7 @@ class ReviewScheduler:
             return
         self._active_task_id = str(task.id)
         self._active_task_type = int(task.task_type or 0)
+        self._active_dispatch_priority = int(task.dispatch_priority or 0)
         self._active_lease_token = task.lease_token or ""
         self._stop_event = Event()
         self._active_future = asyncio.create_task(self._run_claimed_task(task, self._stop_event))
@@ -124,6 +126,7 @@ class ReviewScheduler:
     def claim_next_task(self) -> TaskModel | None:
         now = utc_now()
         candidates = TaskModel.objects(task_type__in=[TASK_TYPE_INCREMENTAL, TASK_TYPE_FULL_SCAN]).order_by(
+            "-dispatch_priority",
             "task_type",
             "create_time",
         )
@@ -134,8 +137,17 @@ class ReviewScheduler:
             claim_query = Q(
                 id=candidate.id,
                 state=candidate.state,
-                trigger_revision=candidate.trigger_revision,
             )
+            revision_query = Q(trigger_revision=candidate.trigger_revision)
+            if int(candidate.trigger_revision or 1) == 1:
+                # Legacy tasks predate trigger_revision. MongoEngine exposes the
+                # field default as 1, while MongoDB still has no stored field.
+                revision_query |= Q(trigger_revision__exists=False)
+            claim_query &= revision_query
+            if candidate.dispatch_priority:
+                claim_query &= Q(dispatch_priority=candidate.dispatch_priority)
+            else:
+                claim_query &= (Q(dispatch_priority=0) | Q(dispatch_priority__exists=False))
             if candidate.lease_token:
                 claim_query &= Q(lease_token=candidate.lease_token)
             else:
@@ -143,12 +155,13 @@ class ReviewScheduler:
             claimed = TaskModel.objects(claim_query).modify(
                 new=True,
                 set__state=1,
-                set__completion_status="running",
+                set__completion_status="retry_running" if candidate.retry_failed_only else "running",
                 set__lease_owner=self.worker_id,
                 set__lease_token=lease_token,
                 set__lease_expires_at=now + timedelta(seconds=max(10, self.settings.scheduler_lease_seconds)),
                 set__heartbeat_time=now,
                 set__last_start_time=now,
+                set__automatic_retry_pending=False,
                 set__interrupt_requested=False,
                 set__update_time=now,
             )
@@ -163,7 +176,13 @@ class ReviewScheduler:
         if task.state == 1:
             return lease_expired
         if task.state == 3 and (task.retry_count or 0) < max(1, self.settings.scheduler_max_task_retries):
-            return task.completion_status in {"partial", "interrupted", "failed"} and lease_expired
+            if (
+                not task.automatic_retry_pending
+                or task.completion_status not in {"partial", "failed"}
+                or not lease_expired
+            ):
+                return False
+            return task.next_retry_time is None or not self._is_after(task.next_retry_time, now)
         return False
 
     def _heartbeat(self) -> None:
@@ -198,17 +217,40 @@ class ReviewScheduler:
             "partial",
         }
 
-    def _has_waiting_incremental(self) -> bool:
+    def _has_higher_priority_task(self) -> bool:
         now = utc_now()
-        for task in TaskModel.objects(task_type=TASK_TYPE_INCREMENTAL).order_by("create_time"):
-            if self._eligible(task, now):
+        candidates = TaskModel.objects(task_type__in=[TASK_TYPE_INCREMENTAL, TASK_TYPE_FULL_SCAN]).order_by(
+            "-dispatch_priority",
+            "task_type",
+            "create_time",
+        )
+        for task in candidates:
+            if not self._eligible(task, now):
+                continue
+            candidate_priority = int(task.dispatch_priority or 0)
+            if candidate_priority > self._active_dispatch_priority:
+                return True
+            if (
+                candidate_priority == self._active_dispatch_priority
+                and self._active_task_type == TASK_TYPE_FULL_SCAN
+                and task.task_type == TASK_TYPE_INCREMENTAL
+            ):
                 return True
         return False
+
+    def _has_waiting_incremental(self) -> bool:
+        """Compatibility helper used by diagnostics and focused scheduler tests."""
+        now = utc_now()
+        return any(
+            self._eligible(task, now)
+            for task in TaskModel.objects(task_type=TASK_TYPE_INCREMENTAL).order_by("create_time")
+        )
 
     def _clear_active(self) -> None:
         self._active_future = None
         self._active_task_id = ""
         self._active_task_type = 0
+        self._active_dispatch_priority = 0
         self._active_lease_token = ""
         self._stop_event = None
 
@@ -226,3 +268,9 @@ class ReviewScheduler:
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
         return value <= now
+
+    @staticmethod
+    def _is_after(value: datetime, now: datetime) -> bool:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value > now

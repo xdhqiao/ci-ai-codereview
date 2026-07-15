@@ -14,6 +14,7 @@ def test_scheduler_health_check(client):
         "running": False,
         "active_task_id": "",
         "active_task_type": 0,
+        "active_dispatch_priority": 0,
         "active_future_present": False,
         "active_future_done": None,
         "active_lease_present": False,

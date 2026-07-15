@@ -863,6 +863,8 @@ def test_full_scan_token_budget_skips_files(tmp_path: Path):
     assert reviewed_task.incomplete_file_num == 1
     assert reviewed_task.skipped_file_num == 1
     assert reviewed_task.token_budget_num == 20
+    assert reviewed_task.automatic_retry_pending is False
+    assert reviewed_task.next_retry_time is None
     skipped = CodeFileModel.objects(task_id=str(task.id), file_name="b.c").first()
     assert skipped.extra["status"] == "skipped_budget"
     assert skipped.code_blocks == []
@@ -922,6 +924,69 @@ def test_review_resume_is_invalidated_when_model_changes(tmp_path: Path):
     assert reviewed_task.resumed_file_num == 0
     assert second_file.extra["status"] == "reviewed"
     assert second_file.extra["review_fingerprint"] != first_fingerprint
+
+
+def test_manual_retry_only_reviews_failed_blocks_and_preserves_other_files(tmp_path: Path):
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "failed.c").write_text(
+        "\n".join(f"int failed_{index}(void) {{ return {index}; }}" for index in range(8)) + "\n",
+        encoding="utf-8",
+    )
+    (target_dir / "completed.c").write_text(
+        "int completed(void) { return 0; }\n",
+        encoding="utf-8",
+    )
+    task = TaskModel(
+        project_id="manual-retry-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        state=0,
+    ).save()
+    base_settings = dict(
+        mongo_mock=True,
+        llm_mock_enabled=True,
+        diff_token_threshold=12,
+        review_exclude_paths="",
+        full_scan_batch_dedup_enabled=False,
+        full_scan_project_summary_enabled=False,
+    )
+    ReviewTaskService(Settings(**base_settings, llm_model="model-a")).review_task(task)
+
+    failed_file = CodeFileModel.objects(task_id=str(task.id), file_name="failed.c").first()
+    completed_file = CodeFileModel.objects(task_id=str(task.id), file_name="completed.c").first()
+    assert failed_file is not None and len(failed_file.code_blocks) > 1
+    assert completed_file is not None
+    untouched_file_attempts = [block.review_attempt_count for block in completed_file.code_blocks]
+    untouched_file_fingerprints = [block.review_fingerprint for block in completed_file.code_blocks]
+    failed_block_attempts = [block.review_attempt_count for block in failed_file.code_blocks]
+
+    failed_file.code_blocks[0].main_task_completed = False
+    failed_file.code_blocks[0].review_state = 3
+    failed_file.code_blocks[0].failure_message = "simulated timeout"
+    failed_file.state = 3
+    failed_file.extra = {**(failed_file.extra or {}), "status": "partial", "review_complete": False}
+    failed_file.save()
+    task.reload()
+    task.state = 0
+    task.completion_status = "retry_pending"
+    task.retry_failed_only = True
+    task.dispatch_priority = 100
+    task.save()
+
+    reviewed_task = ReviewTaskService(Settings(**base_settings, llm_model="model-b")).review_task(task)
+
+    failed_file.reload()
+    completed_file.reload()
+    assert reviewed_task.state == 2
+    assert reviewed_task.completion_status == "completed"
+    assert reviewed_task.retry_failed_only is False
+    assert CodeFileModel.objects(task_id=str(task.id)).count() == 2
+    assert [block.review_attempt_count for block in completed_file.code_blocks] == untouched_file_attempts
+    assert [block.review_fingerprint for block in completed_file.code_blocks] == untouched_file_fingerprints
+    assert failed_file.code_blocks[0].review_attempt_count == failed_block_attempts[0] + 1
+    assert failed_file.code_blocks[0].failure_message == ""
+    assert [block.review_attempt_count for block in failed_file.code_blocks[1:]] == failed_block_attempts[1:]
 
 
 def test_full_scan_batch_dedup_groups_without_hiding_file_occurrences(tmp_path: Path):
@@ -1113,6 +1178,8 @@ def test_main_task_without_task_done_is_persisted_as_partial(tmp_path: Path):
 
     block = CodeFileModel.objects(task_id=str(task.id)).first().code_blocks[0]
     assert reviewed_task.state == 3
+    assert reviewed_task.automatic_retry_pending is True
+    assert reviewed_task.next_retry_time is not None
     assert block.main_task_completed is False
     assert block.main_task_completion_mode == "max_rounds"
     assert "without task_done" in block.failure_message

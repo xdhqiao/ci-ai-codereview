@@ -37,6 +37,40 @@ def test_scheduler_prioritizes_incremental_then_fifo():
     assert incremental_new.state == 0
 
 
+def test_scheduler_prioritizes_manual_failed_retry_above_incremental():
+    now = datetime.now(timezone.utc)
+    incremental = _task("incremental", 1, 0, now - timedelta(minutes=5))
+    manual_full_retry = _task("manual-full-retry", 2, 0, now - timedelta(minutes=1))
+    manual_full_retry.dispatch_priority = 100
+    manual_full_retry.retry_failed_only = True
+    manual_full_retry.completion_status = "retry_pending"
+    manual_full_retry.save()
+    scheduler = ReviewScheduler(Settings(scheduler_lease_seconds=60))
+
+    claimed = scheduler.claim_next_task()
+
+    assert claimed.id == manual_full_retry.id
+    assert claimed.completion_status == "retry_running"
+    assert incremental.reload().state == 0
+
+
+def test_scheduler_waits_until_automatic_retry_backoff_expires():
+    now = datetime.now(timezone.utc)
+    task = _task("backoff", 1, 3, now - timedelta(minutes=1))
+    task.retry_count = 1
+    task.completion_status = "failed"
+    task.automatic_retry_pending = True
+    task.next_retry_time = now + timedelta(minutes=1)
+    task.save()
+    scheduler = ReviewScheduler(Settings())
+
+    assert scheduler.claim_next_task() is None
+
+    task.next_retry_time = now - timedelta(seconds=1)
+    task.save()
+    assert scheduler.claim_next_task().id == task.id
+
+
 def test_scheduler_reclaims_stale_running_task():
     now = datetime.now(timezone.utc)
     stale = _task("stale", 1, 1, now - timedelta(minutes=5))
@@ -68,6 +102,28 @@ def test_scheduler_claims_pending_task_when_lease_field_is_missing():
     assert claimed is not None
     assert claimed.id == pending.id
     assert claimed.state == 1
+    assert claimed.lease_token
+
+
+def test_scheduler_claims_manual_retry_when_legacy_trigger_revision_is_missing():
+    now = datetime.now(timezone.utc)
+    retry = _task("legacy-manual-retry", 2, 0, now - timedelta(minutes=1))
+    retry.dispatch_priority = 100
+    retry.retry_failed_only = True
+    retry.completion_status = "retry_pending"
+    retry.save()
+    TaskModel._get_collection().update_one(
+        {"_id": retry.id},
+        {"$unset": {"trigger_revision": ""}},
+    )
+    scheduler = ReviewScheduler(Settings(scheduler_lease_seconds=60))
+
+    claimed = scheduler.claim_next_task()
+
+    assert claimed is not None
+    assert claimed.id == retry.id
+    assert claimed.state == 1
+    assert claimed.completion_status == "retry_running"
     assert claimed.lease_token
 
 

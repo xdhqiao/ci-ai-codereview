@@ -15,6 +15,7 @@ class TaskModel(Document):
         "indexes": [
             ("project_id", "review_version", "copy_from_version"),
             ("task_type", "state", "create_time"),
+            ("-dispatch_priority", "task_type", "state", "create_time"),
             {"fields": ["submission_key"], "unique": True, "sparse": True},
         ],
     }
@@ -35,6 +36,12 @@ class TaskModel(Document):
     readable_score = IntField(required=True, default=0)
     code_style_score = IntField(required=True, default=0)
     retry_count = IntField(required=False, default=0)
+    manual_retry_count = IntField(required=False, default=0)
+    dispatch_priority = IntField(required=False, default=0)
+    retry_failed_only = BooleanField(required=False, default=False)
+    automatic_retry_pending = BooleanField(required=False, default=False)
+    retry_requested_time = DateTimeField(required=False)
+    next_retry_time = DateTimeField(required=False)
     code_block_num = IntField(required=False, default=0)
     file_num = IntField(required=False, default=0)
     reviewed_file_num = IntField(required=False, default=0)

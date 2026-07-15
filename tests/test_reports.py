@@ -116,6 +116,10 @@ def test_task_report_uses_changed_line_weight_and_reserved_issue_show_is_ignored
     assert body["authors"] == ["alice", "bob"]
     assert body["highest_severity"] == 5
     assert body["critical_issues"][0]["description"] == "unchecked input"
+    assert body["progress"]["percentage"] == 100
+    assert body["progress"]["completed_file_num"] == 2
+    assert body["progress"]["completed_block_num"] == 3
+    assert body["progress"]["retry_available"] is False
     alice_file = next(item for item in body["files"] if item["file_author"] == "alice")
     assert alice_file["overall_score"] == 67
     assert alice_file["blocks"][0]["block_id"] == 0
@@ -174,9 +178,11 @@ def test_report_page_and_page_size_limit(client):
 
     page = client.get("/demo-c/feature_vs_master.html")
     assert page.status_code == 200
+    assert page.headers["cache-control"] == "no-store"
     assert "代码审核报告" in page.text
     canonical_api = client.get("/api/reports/demo-c/feature_vs_master.html")
     assert canonical_api.status_code == 200
+    assert canonical_api.headers["cache-control"] == "no-store"
     assert canonical_api.json()["overview"]["task_id"] == str(task.id)
     assert client.get("/demo-c/missing_vs_master.html").status_code == 404
     assert client.get(f"/api/reports/tasks/{task.id}", params={"page_size": 301}).status_code == 422
@@ -187,8 +193,8 @@ def test_report_frontend_has_no_external_css_or_javascript(client):
     page = client.get("/demo-c/feature_vs_master.html")
 
     assert page.status_code == 200
-    assert 'href="/static/report.css"' in page.text
-    assert 'src="/static/report.js"' in page.text
+    assert 'href="/static/report.css?v=' in page.text
+    assert 'src="/static/report.js?v=' in page.text
     assert "https://" not in page.text
     assert "http://" not in page.text
     for asset_path in ["/static/report.css", "/static/report.js"]:
@@ -196,3 +202,118 @@ def test_report_frontend_has_no_external_css_or_javascript(client):
         assert asset.status_code == 200
         assert "https://" not in asset.text
         assert "http://" not in asset.text
+
+
+def test_report_frontend_contains_live_progress_retry_and_scrollable_code_ui(client):
+    _create_report_data()
+
+    page = client.get("/demo-c/feature_vs_master.html")
+    css = client.get("/static/report.css").text
+    javascript = client.get("/static/report.js").text
+
+    assert 'id="progress-percentage"' in page.text
+    assert 'id="retry-failures-button"' in page.text
+    assert "overflow-y: auto" in css
+    assert "max-height: 520px" in css
+    assert "/retry-failures" in javascript
+    assert "auto_refresh_seconds" in javascript
+
+
+def test_progress_uses_completed_blocks_and_only_enables_retry_when_failures_are_all_that_remain(client):
+    task = TaskModel(
+        project_id="progress-project",
+        review_version="feature",
+        copy_from_version="master",
+        task_type=1,
+        state=1,
+        completion_status="running",
+    ).save()
+    code_file = CodeFileModel(
+        task_id=str(task.id),
+        project_id=task.project_id,
+        review_version=task.review_version,
+        copy_from_version=task.copy_from_version,
+        task_type=1,
+        file_name="src/progress.c",
+        state=1,
+        code_blocks=[
+            CodeBlock(
+                block_id=0,
+                contents=["     1+  int completed;"],
+                main_task_completed=True,
+                review_state=2,
+            ),
+            CodeBlock(block_id=1, contents=["     2+  int pending;"], review_state=0),
+            CodeBlock(
+                block_id=2,
+                contents=["     3+  int failed;"],
+                failure_message="model timeout",
+                review_state=3,
+            ),
+        ],
+        extra={"status": "reviewing"},
+    ).save()
+
+    running = client.get(f"/api/reports/tasks/{task.id}").json()["progress"]
+    assert running["percentage"] == 33
+    assert running["completed_block_num"] == 1
+    assert running["pending_block_num"] == 1
+    assert running["failed_block_num"] == 1
+    assert running["retry_available"] is False
+
+    code_file.code_blocks[1].main_task_completed = True
+    code_file.code_blocks[1].review_state = 2
+    code_file.state = 3
+    code_file.extra = {"status": "partial"}
+    code_file.save()
+    task.state = 3
+    task.completion_status = "partial"
+    task.save()
+
+    partial = client.get(f"/api/reports/tasks/{task.id}").json()["progress"]
+    assert partial["percentage"] == 67
+    assert partial["pending_block_num"] == 0
+    assert partial["reviewing_block_num"] == 0
+    assert partial["failed_block_num"] == 1
+    assert partial["retry_available"] is True
+
+    code_file.code_blocks[2].main_task_completed = True
+    code_file.code_blocks[2].review_state = 2
+    code_file.code_blocks[2].failure_message = ""
+    code_file.state = 2
+    code_file.extra = {"status": "reviewed"}
+    code_file.save()
+    task.state = 2
+    task.completion_status = "completed"
+    task.save()
+
+    completed = client.get(f"/api/reports/tasks/{task.id}").json()["progress"]
+    assert completed["percentage"] == 100
+    assert completed["retry_available"] is False
+
+
+def test_progress_treats_legacy_blocks_in_reviewed_file_as_completed(client):
+    task = TaskModel(
+        project_id="legacy-progress",
+        review_version="feature",
+        copy_from_version="master",
+        task_type=1,
+        state=2,
+        completion_status="completed",
+    ).save()
+    CodeFileModel(
+        task_id=str(task.id),
+        project_id=task.project_id,
+        review_version=task.review_version,
+        copy_from_version=task.copy_from_version,
+        task_type=1,
+        file_name="src/legacy.c",
+        code_blocks=[CodeBlock(block_id=0, contents=["     1+  int legacy;"], comment="legacy result")],
+        extra={"status": "reviewed"},
+    ).save()
+
+    response = client.get(f"/api/reports/tasks/{task.id}")
+
+    assert response.status_code == 200
+    assert response.json()["progress"]["percentage"] == 100
+    assert response.json()["files"][0]["blocks"][0]["status"] == "completed"

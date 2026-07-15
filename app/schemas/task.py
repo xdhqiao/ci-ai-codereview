@@ -36,6 +36,12 @@ class TaskResponse(BaseModel):
     readable_score: int
     code_style_score: int
     retry_count: int
+    manual_retry_count: int
+    dispatch_priority: int
+    retry_failed_only: bool
+    automatic_retry_pending: bool
+    retry_requested_time: datetime | None
+    next_retry_time: datetime | None
     code_block_num: int
     file_num: int
     reviewed_file_num: int
@@ -90,6 +96,12 @@ class TaskResponse(BaseModel):
             readable_score=task.readable_score,
             code_style_score=task.code_style_score,
             retry_count=task.retry_count or 0,
+            manual_retry_count=task.manual_retry_count or 0,
+            dispatch_priority=task.dispatch_priority or 0,
+            retry_failed_only=bool(task.retry_failed_only),
+            automatic_retry_pending=bool(task.automatic_retry_pending),
+            retry_requested_time=task.retry_requested_time,
+            next_retry_time=task.next_retry_time,
             code_block_num=task.code_block_num or 0,
             file_num=task.file_num or 0,
             reviewed_file_num=task.reviewed_file_num or 0,

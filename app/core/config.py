@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     scheduler_interval_seconds: int = 5
     scheduler_lease_seconds: int = 120
     scheduler_max_task_retries: int = 3
+    scheduler_retry_backoff_seconds: int = 30
+    scheduler_retry_backoff_max_seconds: int = 900
 
     mongodb_uri: str = "mongodb://mongodb:27017/ci_ai_codereview"
     mongodb_db: str = "ci_ai_codereview"

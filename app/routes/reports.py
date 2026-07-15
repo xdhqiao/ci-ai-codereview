@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 from fastapi.responses import FileResponse
 
 from app.schemas.report import FeedbackRequest, FeedbackResponse, TaskReportResponse
@@ -14,16 +14,18 @@ REPORT_PAGE = Path(__file__).resolve().parents[1] / "static" / "report.html"
 @router.get("/{project_id}/{comparison}.html", include_in_schema=False)
 def report_page(project_id: str, comparison: str) -> FileResponse:
     TaskReportService().find_task_by_comparison(project_id, comparison)
-    return FileResponse(REPORT_PAGE)
+    return FileResponse(REPORT_PAGE, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/api/reports/tasks/{task_id}", response_model=TaskReportResponse)
 def get_task_report(
     task_id: str,
+    response: Response,
     author: str = "",
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=300, ge=1, le=300),
 ) -> TaskReportResponse:
+    response.headers["Cache-Control"] = "no-store"
     return TaskReportService().get_report(task_id, author=author, page=page, page_size=page_size)
 
 
@@ -31,10 +33,12 @@ def get_task_report(
 def get_task_report_by_comparison(
     project_id: str,
     comparison: str,
+    response: Response,
     author: str = "",
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=300, ge=1, le=300),
 ) -> TaskReportResponse:
+    response.headers["Cache-Control"] = "no-store"
     return TaskReportService().get_report_by_comparison(
         project_id,
         comparison,

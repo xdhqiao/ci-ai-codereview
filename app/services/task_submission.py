@@ -38,7 +38,13 @@ class TaskFileSynchronizer:
     def __init__(self, diff_service: CodeDiffService) -> None:
         self.diff_service = diff_service
 
-    def synchronize(self, task: TaskModel, collection: ReviewCollection) -> list[CodeFileModel]:
+    def synchronize(
+        self,
+        task: TaskModel,
+        collection: ReviewCollection,
+        *,
+        preserve_stale: bool = False,
+    ) -> list[CodeFileModel]:
         existing_files = {
             item.file_name: item for item in CodeFileModel.objects(task_id=str(task.id))
         }
@@ -93,26 +99,37 @@ class TaskFileSynchronizer:
             code_file.save()
             synchronized.append(code_file)
 
-        stale_query = CodeFileModel.objects(task_id=str(task.id))
-        if target_names:
-            stale_query = stale_query(file_name__nin=sorted(target_names))
-        stale_query.delete()
+        if not preserve_stale:
+            stale_query = CodeFileModel.objects(task_id=str(task.id))
+            if target_names:
+                stale_query = stale_query(file_name__nin=sorted(target_names))
+            stale_query.delete()
         return synchronized
 
     def _synchronize_blocks(self, code_file: CodeFileModel | None, target: ReviewTarget) -> list[CodeBlock]:
-        reusable: dict[str, deque[CodeBlock]] = defaultdict(deque)
+        completed_by_hash: dict[str, deque[CodeBlock]] = defaultdict(deque)
+        incomplete_by_hash: dict[str, deque[CodeBlock]] = defaultdict(deque)
         if code_file is not None:
             for block in code_file.code_blocks:
-                if block.block_hash and self._block_completed(block):
-                    reusable[block.block_hash].append(block)
+                if not block.block_hash:
+                    continue
+                target_queue = completed_by_hash if self._block_completed(block) else incomplete_by_hash
+                target_queue[block.block_hash].append(block)
 
         blocks: list[CodeBlock] = []
         for block_id, contents in enumerate(self.diff_service.split_code_blocks(target.diff_lines)):
             digest = code_block_hash(contents)
-            if reusable[digest]:
-                block = reusable[digest].popleft()
+            if completed_by_hash[digest]:
+                block = completed_by_hash[digest].popleft()
                 block.block_id = block_id
                 block.review_state = FILE_STATE_COMPLETED
+                blocks.append(block)
+                continue
+            if incomplete_by_hash[digest]:
+                block = incomplete_by_hash[digest].popleft()
+                block.block_id = block_id
+                block.contents = list(contents)
+                block.review_state = FILE_STATE_PENDING
                 blocks.append(block)
                 continue
             blocks.append(
@@ -220,6 +237,10 @@ class TaskSubmissionService:
                 "set__interrupt_requested": True,
                 "set__completion_status": "preparing",
                 "set__completion_email_sent": False,
+                "set__dispatch_priority": 0,
+                "set__retry_failed_only": False,
+                "set__automatic_retry_pending": False,
+                "unset__next_retry_time": 1,
                 "set__update_time": utc_now(),
             }
             if submitter:
@@ -248,6 +269,10 @@ class TaskSubmissionService:
         task.state = TASK_STATE_PENDING
         task.interrupt_requested = False
         task.completion_status = "pending"
+        task.dispatch_priority = 0
+        task.retry_failed_only = False
+        task.automatic_retry_pending = False
+        task.next_retry_time = None
         task.file_num = len(files)
         task.reviewed_file_num = sum(1 for item in files if item.state == FILE_STATE_COMPLETED)
         task.code_block_num = sum(len(item.code_blocks) for item in files)

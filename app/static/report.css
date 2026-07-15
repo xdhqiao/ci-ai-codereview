@@ -34,9 +34,19 @@ h2 { font-size: 18px; }
 .muted { color: var(--muted); }
 .status { border: 1px solid #9fd7c4; border-radius: 4px; background: var(--accent-soft); color: #056447; padding: 5px 10px; font-weight: 650; }
 .status.partial { border-color: #f2c28f; background: #fff6e8; color: #8f4b00; }
+.status.failed { border-color: #efaaaa; background: var(--danger-soft); color: var(--danger); }
 .section-title { margin-bottom: 16px; font-weight: 700; }
 main > section { padding: 32px 0; border-bottom: 1px solid var(--line); }
 .overview-grid { display: grid; grid-template-columns: repeat(5, minmax(140px, 1fr)); gap: 20px; }
+.progress-heading { margin-bottom: 14px; }
+.progress-summary { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: center; gap: 14px; }
+.progress-summary > strong { font-size: 21px; font-variant-numeric: tabular-nums; }
+.progress-track { height: 12px; overflow: hidden; border: 1px solid #cad3d5; border-radius: 4px; background: #e6ebec; }
+.progress-track > span { display: block; width: 0; height: 100%; background: var(--accent); transition: width .25s ease; }
+.progress-details { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 13px; color: var(--muted); font-size: 12px; }
+.retry-status { margin: 10px 0 0; }
+.button-primary { border: 1px solid var(--accent); border-radius: 4px; background: var(--accent); color: white; padding: 7px 14px; cursor: pointer; }
+.button-primary:disabled { opacity: .55; cursor: not-allowed; }
 .datum dt { color: var(--muted); font-size: 12px; }
 .datum dd { margin: 4px 0 0; font-weight: 650; overflow-wrap: anywhere; }
 .score-band { display: grid; grid-template-columns: 220px minmax(320px, 1fr) minmax(360px, 1.2fr); align-items: center; gap: 32px; }
@@ -80,9 +90,13 @@ tbody tr:last-child td { border-bottom: 0; }
 .file-dimensions { flex-basis: 100%; color: var(--muted); font-size: 11px; }
 .file-score { white-space: nowrap; font-size: 12px; color: var(--muted); }
 .file-score strong { color: var(--ink); font-size: 21px; margin-left: 6px; }
+.review-status { display: inline-flex; align-items: center; border-radius: 3px; padding: 2px 7px; background: #edf2f4; color: #536168; font-size: 11px; font-weight: 700; }
+.review-status.completed { background: var(--accent-soft); color: var(--accent); }
+.review-status.reviewing { background: #e8f1ff; color: #1769aa; }
+.review-status.failed { background: var(--danger-soft); color: var(--danger); }
 .block-review + .block-review { border-top: 2px solid var(--line); }
 .block-heading { display: flex; justify-content: space-between; gap: 16px; padding: 12px 18px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
-.code-panel { max-height: 600px; overflow: auto; background: var(--code); color: #dfe8e6; }
+.code-panel { width: calc(100% - 36px); max-height: 520px; margin: 18px; overflow-x: auto; overflow-y: auto; scrollbar-gutter: stable; border: 1px solid #34474e; border-radius: 4px; background: var(--code); color: #dfe8e6; }
 .code-panel pre { margin: 0; min-width: max-content; padding: 14px 0; font: 12px/1.65 Consolas, "SFMono-Regular", monospace; }
 .code-line { display: block; padding: 0 16px; white-space: pre; }
 .code-line.add { background: #123c31; color: #ddf8ed; }
@@ -90,6 +104,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .block-comment { display: grid; grid-template-columns: 120px 1fr; gap: 18px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
 .block-comment strong { color: var(--muted); font-size: 12px; }
 .block-comment p { margin: 0; white-space: pre-wrap; }
+.block-failure { margin: 0 18px 16px; border: 1px solid #efaaaa; border-radius: 4px; background: var(--danger-soft); color: var(--danger); padding: 10px 12px; white-space: pre-wrap; }
 .issue-list { padding: 0 18px 8px; }
 .issue-item { display: grid; grid-template-columns: minmax(0, 1fr) 46px; gap: 12px; padding: 16px 0; border-bottom: 1px solid var(--line); }
 .issue-item:last-child { border-bottom: 0; }

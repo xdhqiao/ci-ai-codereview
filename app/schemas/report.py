@@ -47,6 +47,12 @@ class ReportIssueResponse(BaseModel):
 
 class ReportBlockResponse(BaseModel):
     block_id: int
+    review_state: int
+    status: str
+    process_time_ms: int
+    main_task_completed: bool
+    completion_mode: str
+    failure_message: str
     changed_line_num: int
     overall_score: int
     scores: ScoreResponse
@@ -59,6 +65,10 @@ class ReportFileResponse(BaseModel):
     file_id: str
     file_name: str
     file_author: str
+    review_state: int
+    status: str
+    completed_block_num: int
+    failed_block_num: int
     changed_line_num: int
     added_line_num: int
     overall_score: int
@@ -114,6 +124,27 @@ class ReportMetricsResponse(BaseModel):
     incomplete_file_num: int
 
 
+class ReportProgressResponse(BaseModel):
+    percentage: int
+    total_file_num: int
+    completed_file_num: int
+    reviewing_file_num: int
+    pending_file_num: int
+    failed_file_num: int
+    total_block_num: int
+    completed_block_num: int
+    reviewing_block_num: int
+    pending_block_num: int
+    failed_block_num: int
+    retryable_file_num: int
+    retryable_block_num: int
+    retry_available: bool
+    retry_in_progress: bool
+    manual_retry_count: int
+    next_retry_time: datetime | None
+    auto_refresh_seconds: int
+
+
 class ReportPaginationResponse(BaseModel):
     page: int
     page_size: int
@@ -123,6 +154,7 @@ class ReportPaginationResponse(BaseModel):
 
 class TaskReportResponse(BaseModel):
     overview: ReportOverviewResponse
+    progress: ReportProgressResponse
     metrics: ReportMetricsResponse
     authors: list[str]
     selected_author: str
