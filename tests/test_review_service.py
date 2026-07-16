@@ -2,7 +2,10 @@ import time
 from pathlib import Path
 from threading import Barrier, BrokenBarrierError
 
+import pytest
+
 from app.core.config import Settings, get_settings
+from app.core.exceptions import ReviewInterruptedError
 from app.models.code_file import CodeBlock, CodeFileModel, Issue
 from app.models.task import TaskModel
 from app.services.diff_service import ReviewTarget
@@ -894,6 +897,46 @@ def test_review_task_resume_reuses_completed_file(tmp_path: Path):
     assert CodeFileModel.objects(task_id=str(task.id)).count() == 1
     code_file = CodeFileModel.objects(task_id=str(task.id)).first()
     assert code_file.extra["status"] == "resumed"
+
+
+def test_finish_task_does_not_overwrite_a_newer_trigger_revision(monkeypatch):
+    task = TaskModel(
+        project_id="finish-race-project",
+        review_version="master",
+        copy_from_version="0_version",
+        task_type=2,
+        state=1,
+        trigger_revision=1,
+        lease_owner="worker",
+        lease_token="lease-1",
+    ).save()
+    service = ReviewTaskService(
+        Settings(mongo_mock=True, llm_mock_enabled=True),
+        lease_token="lease-1",
+    )
+    service.active_task_id = str(task.id)
+    service.active_trigger_revision = 1
+
+    def retrigger_while_summarizing(*_args, **_kwargs):
+        TaskModel.objects(id=task.id).update_one(
+            inc__trigger_revision=1,
+            set__state=4,
+            set__completion_status="preparing",
+            set__interrupt_requested=True,
+        )
+        return "outdated project summary"
+
+    monkeypatch.setattr(service, "_maybe_generate_project_summary", retrigger_while_summarizing)
+
+    with pytest.raises(ReviewInterruptedError):
+        service._finish_task(task, [], time.monotonic())
+
+    task.reload()
+    assert task.trigger_revision == 2
+    assert task.state == 4
+    assert task.completion_status == "preparing"
+    assert task.project_summary == ""
+    assert task.interrupt_requested is True
 
 
 def test_review_resume_is_invalidated_when_model_changes(tmp_path: Path):

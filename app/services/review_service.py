@@ -215,13 +215,27 @@ class ReviewTaskService:
             self._finish_task(task, saved_files, started_at)
             if task.state == TASK_STATE_COMPLETED and not task.completion_email_sent:
                 ReviewNotificationService().send_review_completed(task)
-                task.completion_email_sent = True
-                task.save()
+                updated = TaskModel.objects(
+                    id=task.id,
+                    trigger_revision=self.active_trigger_revision,
+                    state=TASK_STATE_COMPLETED,
+                ).update_one(
+                    set__completion_email_sent=True,
+                    set__update_time=utc_now(),
+                )
+                if updated:
+                    task.completion_email_sent = True
+                else:
+                    return TaskModel.objects(id=task.id).first() or task
             return task
         except ReviewInterruptedError:
             self._mark_task_interrupted(task, started_at)
             return TaskModel.objects(id=task.id).first() or task
         except Exception as exc:
+            current = TaskModel.objects(id=task.id).only("trigger_revision").first()
+            if current is not None and (current.trigger_revision or 0) != self.active_trigger_revision:
+                self._mark_task_interrupted(task, started_at)
+                return TaskModel.objects(id=task.id).first() or current
             task.retry_count = (task.retry_count or 0) + 1
             task.state = TASK_STATE_PARTIAL
             task.completion_status = "failed"
@@ -2309,6 +2323,7 @@ class ReviewTaskService:
 
         project_summary = self._build_project_summary(task, code_files, issue_summary, severity_summary)
         llm_project_summary = self._maybe_generate_project_summary(task, code_files, project_summary)
+        self._check_interrupted()
         if llm_project_summary:
             project_summary["summary"] = llm_project_summary
             project_summary["summary_source"] = "llm"
@@ -2390,6 +2405,7 @@ class ReviewTaskService:
         task.heartbeat_time = None
         task.interrupt_requested = False
         task.update_time = utc_now()
+        self._check_interrupted()
         task.save()
 
     def _build_project_summary(

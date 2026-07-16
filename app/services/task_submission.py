@@ -20,6 +20,8 @@ from app.services.diff_service import (
     ReviewTarget,
 )
 TASK_STATE_PENDING = 0
+TASK_STATE_RUNNING = 1
+TASK_STATE_COMPLETED = 2
 TASK_STATE_PREPARING = 4
 FILE_STATE_PENDING = 0
 FILE_STATE_COMPLETED = 2
@@ -132,16 +134,48 @@ class TaskFileSynchronizer:
                 block.review_state = FILE_STATE_PENDING
                 blocks.append(block)
                 continue
-            blocks.append(
-                CodeBlock(
-                    block_id=block_id,
-                    block_hash=digest,
-                    contents=list(contents),
-                    review_state=FILE_STATE_PENDING,
-                    main_task_completed=False,
-                )
-            )
+            blocks.append(self._new_pending_block(block_id, digest, contents))
         return blocks
+
+    @staticmethod
+    def _new_pending_block(block_id: int, digest: str, contents: list[str]) -> CodeBlock:
+        """Create a changed block without carrying any result from its previous contents."""
+        return CodeBlock(
+            block_id=block_id,
+            block_hash=digest,
+            review_fingerprint="",
+            contents=list(contents),
+            comment="",
+            plan_change_summary="",
+            plan_risk_level="",
+            plan_checkpoints=[],
+            related_files=[],
+            static_findings=[],
+            logic_score=0,
+            performance_score=0,
+            security_score=0,
+            readable_score=0,
+            code_style_score=0,
+            comment_line_number=0,
+            issues=[],
+            process_time=0,
+            llm_prompt_tokens=0,
+            llm_completion_tokens=0,
+            llm_total_tokens=0,
+            llm_reasoning_tokens=0,
+            llm_cached_tokens=0,
+            llm_elapsed_ms=0,
+            memory_compression_count=0,
+            main_task_completed=False,
+            main_task_completion_mode="",
+            main_task_round_count=0,
+            model_rounds=[],
+            tool_calls=[],
+            failure_message="",
+            review_state=FILE_STATE_PENDING,
+            review_attempt_count=0,
+            update_time=utc_now(),
+        )
 
     @staticmethod
     def _block_completed(block: CodeBlock) -> bool:
@@ -210,6 +244,8 @@ class TaskSubmissionService:
         if task is None:
             task = TaskModel.objects(**identity).order_by("-create_time").first()
         created = task is None
+        previous_state = TASK_STATE_PREPARING
+        preserve_active_lease = False
         if task is None:
             try:
                 task = TaskModel(
@@ -228,6 +264,8 @@ class TaskSubmissionService:
         if task is None:
             raise AppError("Failed to create or find review task", status_code=409, code="task_trigger_conflict")
         if not created:
+            previous_state = int(task.state or TASK_STATE_PENDING)
+            preserve_active_lease = self._has_active_worker(task)
             updates = {
                 "inc__trigger_count": 1,
                 "inc__trigger_revision": 1,
@@ -236,7 +274,6 @@ class TaskSubmissionService:
                 "set__state": TASK_STATE_PREPARING,
                 "set__interrupt_requested": True,
                 "set__completion_status": "preparing",
-                "set__completion_email_sent": False,
                 "set__dispatch_priority": 0,
                 "set__retry_failed_only": False,
                 "set__automatic_retry_pending": False,
@@ -258,28 +295,73 @@ class TaskSubmissionService:
                 collection = diff_service.scan_directory_with_context(Path(review_path))
             files = TaskFileSynchronizer(diff_service).synchronize(task, collection)
         except Exception as exc:
-            task.state = 3
-            task.completion_status = "preparation_failed"
-            task.update_time = utc_now()
-            task.save()
+            TaskModel.objects(id=task.id, trigger_revision=task.trigger_revision).update_one(
+                set__state=3,
+                set__completion_status="preparation_failed",
+                set__interrupt_requested=False,
+                set__update_time=utc_now(),
+            )
             if isinstance(exc, AppError):
                 raise
             raise AppError(f"Failed to prepare review task: {exc}", status_code=422, code="task_preparation_failed") from exc
 
-        task.state = TASK_STATE_PENDING
-        task.interrupt_requested = False
-        task.completion_status = "pending"
-        task.dispatch_priority = 0
-        task.retry_failed_only = False
-        task.automatic_retry_pending = False
-        task.next_retry_time = None
-        task.file_num = len(files)
-        task.reviewed_file_num = sum(1 for item in files if item.state == FILE_STATE_COMPLETED)
-        task.code_block_num = sum(len(item.code_blocks) for item in files)
-        task.add_code_line_num = sum(item.add_code_line_num or 0 for item in files)
-        task.update_time = utc_now()
-        task.save()
-        return task
+        completed_file_num = sum(1 for item in files if item.state == FILE_STATE_COMPLETED)
+        pending_file_num = len(files) - completed_file_num
+        needs_finalization = not created and previous_state != TASK_STATE_COMPLETED and pending_file_num == 0
+        has_pending_work = pending_file_num > 0 or needs_finalization
+        updates = {
+            "set__state": TASK_STATE_PENDING if has_pending_work else TASK_STATE_COMPLETED,
+            "set__interrupt_requested": False,
+            "set__completion_status": "pending" if has_pending_work else "completed",
+            "set__dispatch_priority": 0,
+            "set__retry_failed_only": False,
+            "set__automatic_retry_pending": False,
+            "unset__next_retry_time": 1,
+            "set__file_num": len(files),
+            "set__reviewed_file_num": completed_file_num,
+            "set__resumed_file_num": completed_file_num,
+            "set__skipped_file_num": 0,
+            "set__incomplete_file_num": 0,
+            "set__code_block_num": sum(len(item.code_blocks) for item in files),
+            "set__add_code_line_num": sum(item.add_code_line_num or 0 for item in files),
+            "set__comment_line_number": sum(item.comment_line_number or 0 for item in files),
+            "set__update_time": utc_now(),
+        }
+        if has_pending_work:
+            updates.update(
+                {
+                    "set__completion_email_sent": False,
+                    "set__score": 0,
+                    "set__logic_score": 0,
+                    "set__performance_score": 0,
+                    "set__security_score": 0,
+                    "set__readable_score": 0,
+                    "set__code_style_score": 0,
+                    "set__task_model_rounds": [],
+                    "set__project_summary": "",
+                    "set__developer_issue_summary": {},
+                }
+            )
+        if not preserve_active_lease:
+            updates.update(
+                {
+                    "set__lease_owner": "",
+                    "set__lease_token": "",
+                    "unset__lease_expires_at": 1,
+                    "unset__heartbeat_time": 1,
+                }
+            )
+
+        finalized = TaskModel.objects(id=task.id, trigger_revision=task.trigger_revision).modify(
+            new=True,
+            **updates,
+        )
+        if finalized is not None:
+            return finalized
+        latest = TaskModel.objects(id=task.id).first()
+        if latest is None:
+            raise AppError("Review task disappeared during trigger", status_code=409, code="task_trigger_conflict")
+        return latest
 
     @staticmethod
     def _normalize_directory(value: str, field_name: str) -> str:
@@ -289,3 +371,13 @@ class TaskSubmissionService:
         if not path.exists() or not path.is_dir():
             raise AppError(f"{field_name} does not exist or is not a directory: {path}", status_code=422)
         return str(path)
+
+    @staticmethod
+    def _has_active_worker(task: TaskModel) -> bool:
+        if task.state != TASK_STATE_RUNNING or not task.lease_token or task.lease_expires_at is None:
+            return False
+        expires_at = task.lease_expires_at
+        now = utc_now()
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=now.tzinfo)
+        return expires_at > now

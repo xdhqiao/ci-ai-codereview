@@ -590,6 +590,50 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "Incremental task call count did not accumulate",
     )
 
+    step3_started = time.monotonic()
+    full_no_change = client.trigger(full_payload)
+    incremental_no_change = client.trigger(incremental_payload)
+    assert_true(full_no_change["state"] == 2, "Unchanged full retrigger was queued instead of completed")
+    assert_true(
+        incremental_no_change["state"] == 2,
+        "Unchanged incremental retrigger was queued instead of completed",
+    )
+    assert_true(
+        full_no_change["trigger_count"] == 3 and full_no_change["trigger_revision"] == 3,
+        "Unchanged full trigger counters are wrong",
+    )
+    assert_true(
+        incremental_no_change["trigger_count"] == 3 and incremental_no_change["trigger_revision"] == 3,
+        "Unchanged incremental trigger counters are wrong",
+    )
+    for field_name in ("llm_total_tokens", "llm_call_count", "llm_elapsed_ms", "process_time"):
+        assert_true(
+            full_no_change[field_name] == full_step2[field_name],
+            f"Unchanged full retrigger modified {field_name}",
+        )
+        assert_true(
+            incremental_no_change[field_name] == incremental_step2[field_name],
+            f"Unchanged incremental retrigger modified {field_name}",
+        )
+
+    full_files_step3 = client.code_files(full_id)
+    incremental_files_step3 = client.code_files(incremental_id)
+    full_snapshot_step3 = file_snapshot(full_files_step3)
+    incremental_snapshot_step3 = file_snapshot(incremental_files_step3)
+    assert_completed_files(full_files_step3, 10, "Step3 unchanged full")
+    assert_completed_files(incremental_files_step3, 2, "Step3 unchanged incremental")
+    assert_true(
+        all(full_snapshot_step2[name]["blocks"] == full_snapshot_step3[name]["blocks"] for name in full_snapshot_step2),
+        "Unchanged full retrigger modified persisted Block review results",
+    )
+    assert_true(
+        all(
+            incremental_snapshot_step2[name]["blocks"] == incremental_snapshot_step3[name]["blocks"]
+            for name in incremental_snapshot_step2
+        ),
+        "Unchanged incremental retrigger modified persisted Block review results",
+    )
+
     model_names = sorted(
         {
             trace["model"]
@@ -632,6 +676,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "incremental_token_delta": incremental_step2["llm_total_tokens"] - incremental_step1["llm_total_tokens"],
             "full_call_delta": full_step2["llm_call_count"] - full_step1["llm_call_count"],
             "incremental_call_delta": incremental_step2["llm_call_count"] - incremental_step1["llm_call_count"],
+        },
+        "step3": {
+            "elapsed_seconds": round(time.monotonic() - step3_started, 3),
+            "full": compact_task(full_no_change),
+            "incremental": compact_task(incremental_no_change),
+            "full_reused_files": sorted(full_snapshot_step3),
+            "incremental_reused_files": sorted(incremental_snapshot_step3),
+            "llm_call_delta": 0,
+            "token_delta": 0,
         },
         "timeline": timeline.events,
     }
