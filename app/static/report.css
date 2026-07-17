@@ -27,6 +27,9 @@ button, select { min-height: 36px; }
 .shell { width: min(1480px, calc(100% - 40px)); margin: 0 auto; }
 .topbar { border-bottom: 1px solid var(--line); background: var(--surface); }
 .topbar-inner { min-height: 104px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.topbar-actions { display: flex; align-items: center; gap: 12px; }
+.admin-link { color: #526066; font-weight: 650; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.admin-link:hover { color: var(--accent); }
 h1, h2, h3, p { margin-top: 0; }
 h1 { margin-bottom: 0; font-size: 28px; font-weight: 720; }
 h2 { font-size: 18px; }

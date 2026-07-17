@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path
 
 from mongoengine.errors import NotUniqueError
@@ -12,6 +13,7 @@ from app.core.exceptions import AppError
 from app.models.code_file import CodeBlock, CodeFileModel
 from app.models.project import ProjectModel
 from app.models.task import TaskModel, utc_now
+from app.models.task_trigger import TaskTriggerModel
 from app.services.diff_service import (
     TASK_TYPE_FULL_SCAN,
     TASK_TYPE_INCREMENTAL,
@@ -25,6 +27,19 @@ TASK_STATE_COMPLETED = 2
 TASK_STATE_PREPARING = 4
 FILE_STATE_PENDING = 0
 FILE_STATE_COMPLETED = 2
+
+
+@dataclass(frozen=True)
+class TaskFileSyncResult:
+    files: list[CodeFileModel]
+    added_file_names: list[str]
+    changed_file_names: list[str]
+    reused_file_names: list[str]
+    removed_file_names: list[str]
+
+    @property
+    def report_file_names(self) -> list[str]:
+        return sorted([*self.added_file_names, *self.changed_file_names])
 
 
 def code_block_hash(lines: list[str]) -> str:
@@ -47,17 +62,49 @@ class TaskFileSynchronizer:
         *,
         preserve_stale: bool = False,
     ) -> list[CodeFileModel]:
+        return self.synchronize_with_result(
+            task,
+            collection,
+            preserve_stale=preserve_stale,
+        ).files
+
+    def synchronize_with_result(
+        self,
+        task: TaskModel,
+        collection: ReviewCollection,
+        *,
+        preserve_stale: bool = False,
+    ) -> TaskFileSyncResult:
         existing_files = {
             item.file_name: item for item in CodeFileModel.objects(task_id=str(task.id))
         }
         synchronized: list[CodeFileModel] = []
         target_names: set[str] = set()
+        added_file_names: list[str] = []
+        changed_file_names: list[str] = []
+        reused_file_names: list[str] = []
 
         for target in collection.targets:
             target_names.add(target.file_name)
             code_file = existing_files.get(target.file_name)
             source_hash = review_target_hash(target)
+            previous_source_hash = ""
+            previous_block_hashes: list[str] = []
+            if code_file is not None:
+                previous_source_hash = code_file.source_hash or str(
+                    (code_file.extra or {}).get("source_hash") or ""
+                )
+                previous_block_hashes = self._block_hashes(code_file.code_blocks)
             blocks = self._synchronize_blocks(code_file, target)
+            if code_file is None:
+                added_file_names.append(target.file_name)
+            elif previous_source_hash:
+                target_list = changed_file_names if previous_source_hash != source_hash else reused_file_names
+                target_list.append(target.file_name)
+            elif previous_block_hashes != self._block_hashes(blocks):
+                changed_file_names.append(target.file_name)
+            else:
+                reused_file_names.append(target.file_name)
             completed = bool(blocks) and all(self._block_completed(block) for block in blocks)
             if code_file is None:
                 code_file = CodeFileModel(
@@ -70,7 +117,6 @@ class TaskFileSynchronizer:
                     created_by=task.created_by,
                 )
 
-            previous_source_hash = code_file.source_hash or str((code_file.extra or {}).get("source_hash") or "")
             code_file.project_id = task.project_id
             code_file.review_version = task.review_version
             code_file.copy_from_version = task.copy_from_version
@@ -101,12 +147,19 @@ class TaskFileSynchronizer:
             code_file.save()
             synchronized.append(code_file)
 
+        removed_file_names = sorted(set(existing_files) - target_names)
         if not preserve_stale:
             stale_query = CodeFileModel.objects(task_id=str(task.id))
             if target_names:
                 stale_query = stale_query(file_name__nin=sorted(target_names))
             stale_query.delete()
-        return synchronized
+        return TaskFileSyncResult(
+            files=synchronized,
+            added_file_names=sorted(added_file_names),
+            changed_file_names=sorted(changed_file_names),
+            reused_file_names=sorted(reused_file_names),
+            removed_file_names=removed_file_names,
+        )
 
     def _synchronize_blocks(self, code_file: CodeFileModel | None, target: ReviewTarget) -> list[CodeBlock]:
         completed_by_hash: dict[str, deque[CodeBlock]] = defaultdict(deque)
@@ -136,6 +189,10 @@ class TaskFileSynchronizer:
                 continue
             blocks.append(self._new_pending_block(block_id, digest, contents))
         return blocks
+
+    @staticmethod
+    def _block_hashes(blocks: list[CodeBlock]) -> list[str]:
+        return [block.block_hash or code_block_hash(list(block.contents or [])) for block in blocks]
 
     @staticmethod
     def _new_pending_block(block_id: int, digest: str, contents: list[str]) -> CodeBlock:
@@ -229,8 +286,6 @@ class TaskSubmissionService:
             "project_id": project_id,
             "review_version": review_version,
             "copy_from_version": copy_from_version,
-            "review_version_path": review_path,
-            "copy_from_version_path": base_path,
         }
         submission_key = hashlib.sha256(
             json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -250,6 +305,8 @@ class TaskSubmissionService:
             try:
                 task = TaskModel(
                     **identity,
+                    review_version_path=review_path,
+                    copy_from_version_path=base_path,
                     submission_key=submission_key,
                     task_type=task_type,
                     state=TASK_STATE_PREPARING,
@@ -264,12 +321,17 @@ class TaskSubmissionService:
         if task is None:
             raise AppError("Failed to create or find review task", status_code=409, code="task_trigger_conflict")
         if not created:
+            TaskModel.objects(id=task.id, trigger_count__exists=False).update_one(set__trigger_count=1)
+            TaskModel.objects(id=task.id, trigger_revision__exists=False).update_one(set__trigger_revision=1)
+            task.reload()
             previous_state = int(task.state or TASK_STATE_PENDING)
             preserve_active_lease = self._has_active_worker(task)
             updates = {
                 "inc__trigger_count": 1,
                 "inc__trigger_revision": 1,
                 "set__submission_key": submission_key,
+                "set__review_version_path": review_path,
+                "set__copy_from_version_path": base_path,
                 "set__task_type": task_type,
                 "set__state": TASK_STATE_PREPARING,
                 "set__interrupt_requested": True,
@@ -293,7 +355,9 @@ class TaskSubmissionService:
                 collection = diff_service.compare_directories_with_context(Path(base_path), Path(review_path))
             else:
                 collection = diff_service.scan_directory_with_context(Path(review_path))
-            files = TaskFileSynchronizer(diff_service).synchronize(task, collection)
+            sync_result = TaskFileSynchronizer(diff_service).synchronize_with_result(task, collection)
+            files = sync_result.files
+            self._save_trigger_snapshot(task, sync_result)
         except Exception as exc:
             TaskModel.objects(id=task.id, trigger_revision=task.trigger_revision).update_one(
                 set__state=3,
@@ -362,6 +426,36 @@ class TaskSubmissionService:
         if latest is None:
             raise AppError("Review task disappeared during trigger", status_code=409, code="task_trigger_conflict")
         return latest
+
+    @staticmethod
+    def _save_trigger_snapshot(task: TaskModel, result: TaskFileSyncResult) -> None:
+        identity = {
+            "task_id": str(task.id),
+            "trigger_revision": int(task.trigger_revision or 1),
+        }
+        snapshot = TaskTriggerModel.objects(**identity).first()
+        if snapshot is None:
+            try:
+                snapshot = TaskTriggerModel(
+                    **identity,
+                    project_id=task.project_id,
+                    review_version=task.review_version,
+                    copy_from_version=task.copy_from_version,
+                ).save()
+            except NotUniqueError:
+                snapshot = TaskTriggerModel.objects(**identity).first()
+        if snapshot is None:
+            raise AppError("Failed to persist task trigger snapshot", status_code=409, code="task_trigger_conflict")
+        snapshot.project_id = task.project_id
+        snapshot.review_version = task.review_version
+        snapshot.copy_from_version = task.copy_from_version
+        snapshot.report_file_names = result.report_file_names
+        snapshot.added_file_names = result.added_file_names
+        snapshot.changed_file_names = result.changed_file_names
+        snapshot.reused_file_names = result.reused_file_names
+        snapshot.removed_file_names = result.removed_file_names
+        snapshot.update_time = utc_now()
+        snapshot.save()
 
     @staticmethod
     def _normalize_directory(value: str, field_name: str) -> str:

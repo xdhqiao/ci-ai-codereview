@@ -1,0 +1,167 @@
+pipeline {
+    agent { label 'linux-docker' }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '100'))
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        timestamps()
+        timeout(time: 60, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'COMMIT_SHORT', defaultValue: '', description: 'Short commit ID shown by the successful master development deployment')
+    }
+
+    stages {
+        stage('Checkout Master') {
+            steps {
+                checkout scm
+                sh '''
+                    set -eu
+                    if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+                        git fetch --unshallow origin
+                    fi
+                    git fetch --force --prune origin \
+                        '+refs/heads/master:refs/remotes/origin/master'
+                '''
+            }
+        }
+
+        stage('Resolve Release') {
+            steps {
+                sh '''
+                    set -eu
+                    REQUESTED_COMMIT="$(printf '%s' "$COMMIT_SHORT" | tr 'A-F' 'a-f')"
+                    printf '%s' "$REQUESTED_COMMIT" | grep -Eq '^[0-9a-f]{7,40}$' || {
+                        echo 'COMMIT_SHORT must contain 7 to 40 hexadecimal characters' >&2
+                        exit 2
+                    }
+                    MATCHES="$(git rev-parse --disambiguate="$REQUESTED_COMMIT" | sort -u)"
+                    MATCH_COUNT="$(printf '%s\n' "$MATCHES" | sed '/^$/d' | wc -l | tr -d ' ')"
+                    [ "$MATCH_COUNT" = "1" ] || {
+                        echo "COMMIT_SHORT resolves to $MATCH_COUNT Git objects; use a longer value" >&2
+                        exit 2
+                    }
+                    FULL_COMMIT="$(git rev-parse "${MATCHES}^{commit}")"
+                    git merge-base --is-ancestor "$FULL_COMMIT" origin/master || {
+                        echo 'The requested commit is not contained in origin/master' >&2
+                        exit 2
+                    }
+                    git rev-parse --short=8 "$FULL_COMMIT" > .short-commit
+                    printf '%s\n' "$FULL_COMMIT" > .full-commit
+                '''
+                script {
+                    env.FULL_COMMIT = readFile('.full-commit').trim()
+                    env.SHORT_COMMIT = readFile('.short-commit').trim()
+                    env.RELEASE_IMAGE = "${env.CI_IMAGE_REPOSITORY}:release-${env.FULL_COMMIT}"
+                    env.RELEASE_ARCHIVE = "ci-ai-codereview-${env.FULL_COMMIT}.tar.gz"
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.SHORT_COMMIT}"
+                    currentBuild.description = 'production candidate'
+                }
+            }
+        }
+
+        stage('Verify Promoted Image') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'gitlab-registry-read',
+                    usernameVariable: 'REGISTRY_USER',
+                    passwordVariable: 'REGISTRY_PASSWORD'
+                )]) {
+                    sh '''
+                        set -eu
+                        : "${CI_IMAGE_REPOSITORY:?Configure CI_IMAGE_REPOSITORY in Jenkins global properties}"
+                        REGISTRY_HOST="${CI_IMAGE_REPOSITORY%%/*}"
+                        DOCKER_CONFIG="$(mktemp -d)"
+                        export DOCKER_CONFIG
+                        chmod 700 "$DOCKER_CONFIG"
+                        trap 'docker logout "$REGISTRY_HOST" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
+                        set +x
+                        printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY_HOST" \
+                            --username "$REGISTRY_USER" --password-stdin
+                        set -x
+                        docker pull "$RELEASE_IMAGE"
+                        IMAGE_REVISION="$(docker image inspect --format \
+                            '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+                            "$RELEASE_IMAGE")"
+                        [ "$IMAGE_REVISION" = "$FULL_COMMIT" ] || {
+                            echo "Image revision $IMAGE_REVISION does not match $FULL_COMMIT" >&2
+                            exit 2
+                        }
+                    '''
+                }
+            }
+        }
+
+        stage('Package Exact Snapshot') {
+            steps {
+                sh '''
+                    set -eu
+                    git archive --format=tar "$FULL_COMMIT" | gzip -9 > "$RELEASE_ARCHIVE"
+                    sha256sum "$RELEASE_ARCHIVE" > "$RELEASE_ARCHIVE.sha256"
+                '''
+                archiveArtifacts artifacts: 'ci-ai-codereview-*.tar.gz,ci-ai-codereview-*.tar.gz.sha256', fingerprint: true
+            }
+        }
+
+        stage('Production Approval') {
+            steps {
+                script {
+                    def approvalArgs = [
+                        message: "Deploy ${env.SHORT_COMMIT} to production?",
+                        ok: 'Deploy'
+                    ]
+                    if (env.PROD_APPROVERS?.trim()) {
+                        input message: approvalArgs.message,
+                            ok: approvalArgs.ok,
+                            submitter: env.PROD_APPROVERS.trim()
+                    } else {
+                        input message: approvalArgs.message, ok: approvalArgs.ok
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Production') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'prod-deploy-ssh',
+                        keyFileVariable: 'SSH_KEY_FILE',
+                        usernameVariable: 'SSH_USER'
+                    ),
+                    file(credentialsId: 'deploy-known-hosts', variable: 'SSH_KNOWN_HOSTS')
+                ]) {
+                    sh '''
+                        set -eu
+                        : "${PROD_DEPLOY_HOST:?Configure PROD_DEPLOY_HOST in Jenkins global properties}"
+                        : "${PROD_DEPLOY_ROOT:?Configure PROD_DEPLOY_ROOT in Jenkins global properties}"
+                        sh scripts/jenkins_deploy_release.sh \
+                            --host "$PROD_DEPLOY_HOST" \
+                            --port "${PROD_DEPLOY_PORT:-22}" \
+                            --root "$PROD_DEPLOY_ROOT" \
+                            --environment prod \
+                            --archive "$RELEASE_ARCHIVE" \
+                            --checksum "$RELEASE_ARCHIVE.sha256" \
+                            --image "$RELEASE_IMAGE" \
+                            --commit "$FULL_COMMIT"
+                    '''
+                }
+                script {
+                    currentBuild.description = 'production deployed'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh returnStatus: true, script: '''
+                if [ -n "${RELEASE_IMAGE:-}" ]; then
+                    docker image rm "$RELEASE_IMAGE" >/dev/null 2>&1 || true
+                fi
+            '''
+        }
+    }
+}

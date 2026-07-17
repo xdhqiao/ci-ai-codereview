@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 from app.core.config import Settings
 from app.models.task import TaskModel
@@ -185,3 +186,33 @@ async def _assert_safe_poll_keeps_scheduler_error_inside_tick(monkeypatch):
     monkeypatch.setattr(scheduler, "_poll", fail_poll)
 
     await scheduler._safe_poll()
+
+
+def test_scheduler_shutdown_waits_for_active_worker_checkpoint():
+    asyncio.run(_assert_scheduler_shutdown_waits_for_active_worker_checkpoint())
+
+
+async def _assert_scheduler_shutdown_waits_for_active_worker_checkpoint():
+    scheduler = ReviewScheduler(Settings())
+    worker = asyncio.get_running_loop().create_future()
+    scheduler._active_future = worker
+    scheduler._stop_event = Event()
+
+    scheduler.shutdown()
+    asyncio.get_running_loop().call_soon(worker.set_result, None)
+
+    assert await scheduler.wait_for_shutdown(1) is True
+    assert scheduler._stop_event.is_set() is True
+
+
+def test_scheduler_shutdown_timeout_keeps_worker_resume_safe():
+    asyncio.run(_assert_scheduler_shutdown_timeout_keeps_worker_resume_safe())
+
+
+async def _assert_scheduler_shutdown_timeout_keeps_worker_resume_safe():
+    scheduler = ReviewScheduler(Settings())
+    worker = asyncio.get_running_loop().create_future()
+    scheduler._active_future = worker
+
+    assert await scheduler.wait_for_shutdown(0) is False
+    worker.cancel()

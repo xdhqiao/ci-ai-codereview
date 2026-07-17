@@ -1,5 +1,6 @@
 const state = {
   reportEndpoint: `/api/reports${window.location.pathname}`,
+  triggerRevision: new URLSearchParams(window.location.search).get('trigger_revision') || '',
   author: '',
   page: 1,
   pageSize: 300,
@@ -37,6 +38,7 @@ async function loadReport({ silent = false } = {}) {
   $('#error-state').hidden = true;
   const params = new URLSearchParams({ page: state.page, page_size: state.pageSize });
   if (state.author) params.set('author', state.author);
+  if (state.triggerRevision) params.set('trigger_revision', state.triggerRevision);
   try {
     const response = await fetch(`${state.reportEndpoint}?${params}`, { cache: 'no-store' });
     if (!response.ok) {
@@ -107,6 +109,9 @@ function renderOverview(overview, progress) {
     ['审核时间', dateTime(overview.create_time)],
     ['审核时长', duration(overview.process_time_ms)],
   ];
+  if (overview.view_mode === 'trigger') {
+    values.splice(3, 0, ['提交轮次', `第 ${overview.trigger_revision} 次（当前最新第 ${overview.trigger_count} 次）`]);
+  }
   $('#overview-grid').replaceChildren(...values.map(([term, value]) => {
     const dl = document.createElement('dl');
     dl.className = 'datum';

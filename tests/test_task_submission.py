@@ -7,6 +7,7 @@ from app.core.config import Settings
 from app.models.code_file import CodeFileModel, Issue, ModelRoundTrace, ToolCallTrace
 from app.models.project import ProjectModel
 from app.models.task import TaskModel
+from app.models.task_trigger import TaskTriggerModel
 from app.services.review_service import ReviewTaskService
 from app.services.task_submission import TaskSubmissionService
 
@@ -120,6 +121,57 @@ def test_duplicate_trigger_reuses_unchanged_block_and_resets_changed_block(tmp_p
     assert changed.code_blocks[0].comment == ""
     assert changed.code_blocks[0].issues == []
     assert changed.code_blocks[0].main_task_completed is False
+
+
+def test_same_comparison_reuses_task_when_jenkins_workspace_path_changes(tmp_path):
+    first_root = tmp_path / "jenkins-workspace-1" / "master"
+    second_root = tmp_path / "jenkins-workspace-2" / "master"
+    _write(first_root, "src/app.c", "int app(void) { return 1; }\n")
+    _write(second_root, "src/app.c", "int app(void) { return 2; }\n")
+    service = TaskSubmissionService(Settings(review_exclude_paths=""))
+
+    first = service.trigger(
+        project_id="stable-comparison-project",
+        review_version="master",
+        copy_from_version="0_version",
+        review_version_path=str(first_root),
+    )
+    first_file = CodeFileModel.objects(task_id=str(first.id)).first()
+    first_file.code_blocks[0].comment = "old review"
+    first_file.code_blocks[0].main_task_completed = True
+    first_file.code_blocks[0].review_state = 2
+    first_file.state = 2
+    first_file.save()
+    first.state = 2
+    first.completion_status = "completed"
+    first.save()
+    TaskModel.objects(id=first.id).update_one(
+        unset__submission_key=1,
+        unset__trigger_count=1,
+        unset__trigger_revision=1,
+    )
+
+    second = service.trigger(
+        project_id="stable-comparison-project",
+        review_version="master",
+        copy_from_version="0_version",
+        review_version_path=str(second_root),
+    )
+
+    assert second.id == first.id
+    assert second.trigger_count == 2
+    assert second.trigger_revision == 2
+    assert second.review_version_path == str(second_root.resolve())
+    assert TaskModel.objects(
+        project_id="stable-comparison-project",
+        review_version="master",
+        copy_from_version="0_version",
+    ).count() == 1
+    latest_file = CodeFileModel.objects(task_id=str(first.id)).first()
+    assert latest_file.code_blocks[0].comment == ""
+    assert latest_file.code_blocks[0].main_task_completed is False
+    snapshot = TaskTriggerModel.objects(task_id=str(first.id), trigger_revision=2).first()
+    assert snapshot.report_file_names == ["src/app.c"]
 
 
 @pytest.mark.parametrize(
@@ -487,6 +539,10 @@ def test_incremental_retrigger_only_resets_the_file_whose_diff_changed(tmp_path)
         "copy_from_version_path": str(base_root),
     }
     task = service.trigger(**trigger)
+    first_trigger = TaskTriggerModel.objects(task_id=str(task.id), trigger_revision=1).first()
+    assert first_trigger is not None
+    assert first_trigger.report_file_names == ["src/auth.c", "src/cache.c"]
+    assert first_trigger.added_file_names == ["src/auth.c", "src/cache.c"]
     original_files = {
         item.file_name: item for item in CodeFileModel.objects(task_id=str(task.id))
     }
@@ -501,6 +557,8 @@ def test_incremental_retrigger_only_resets_the_file_whose_diff_changed(tmp_path)
         block.review_state = 2
         block.review_fingerprint = f"fingerprint-{file_name}"
         code_file.code_blocks = [block]
+        code_file.source_hash = ""
+        code_file.extra = {key: value for key, value in (code_file.extra or {}).items() if key != "source_hash"}
         code_file.state = 2
         code_file.save()
     unchanged_before = deepcopy(
@@ -539,6 +597,13 @@ def test_incremental_retrigger_only_resets_the_file_whose_diff_changed(tmp_path)
     assert synchronized["src/auth.c"].code_blocks[0].llm_total_tokens == 0
     assert synchronized["src/auth.c"].code_blocks[0].main_task_completed is False
     assert synchronized["src/auth.c"].code_blocks[0].review_fingerprint == ""
+    second_trigger = TaskTriggerModel.objects(task_id=str(task.id), trigger_revision=2).first()
+    assert second_trigger is not None
+    assert second_trigger.report_file_names == ["src/auth.c"]
+    assert second_trigger.added_file_names == []
+    assert second_trigger.changed_file_names == ["src/auth.c"]
+    assert second_trigger.reused_file_names == ["src/cache.c"]
+    assert second_trigger.removed_file_names == []
 
 
 def test_full_client_server_resume_reviews_only_the_changed_block(tmp_path):

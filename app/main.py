@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import get_settings
 from app.core.database import connect_to_mongo, disconnect_mongo
 from app.core.exceptions import register_exception_handlers
-from app.routes import code_files, health, reports, tasks
+from app.routes import admin, code_files, health, reports, tasks
 from app.services.scheduler import ReviewScheduler
 
 
@@ -23,6 +23,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         scheduler.shutdown()
+        await scheduler.wait_for_shutdown(settings.scheduler_shutdown_grace_seconds)
         disconnect_mongo(settings)
 
 
@@ -33,6 +34,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(tasks.router)
     app.include_router(code_files.router)
+    app.include_router(admin.router)
     app.include_router(reports.router)
     app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "static"), name="static")
     return app

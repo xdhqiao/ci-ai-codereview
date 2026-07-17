@@ -1,0 +1,55 @@
+services:
+  web:
+    image: ${APP_IMAGE:?APP_IMAGE is required}
+    container_name: ci-ai-codereview-${DEPLOY_ENV:?DEPLOY_ENV is required}-web-${DEPLOY_SLOT:?DEPLOY_SLOT is required}
+    restart: unless-stopped
+    env_file:
+      - ${APP_ENV_FILE:?APP_ENV_FILE is required}
+    environment:
+      APP_ENV: ${DEPLOY_ENV}
+      APP_ENABLE_SCHEDULER: "false"
+      CODE_REPOSITORY_ROOT: /repositories
+    volumes:
+      - type: bind
+        source: ${CODE_REPOSITORY_HOST_ROOT:?CODE_REPOSITORY_HOST_ROOT is required}
+        target: /repositories
+        read_only: true
+    networks:
+      - code-review
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
+      interval: 5s
+      timeout: 6s
+      retries: 24
+      start_period: 10s
+    stop_grace_period: ${APP_STOP_GRACE_PERIOD:-360s}
+
+  worker:
+    image: ${APP_IMAGE:?APP_IMAGE is required}
+    container_name: ci-ai-codereview-${DEPLOY_ENV:?DEPLOY_ENV is required}-worker-${DEPLOY_SLOT:?DEPLOY_SLOT is required}
+    restart: unless-stopped
+    env_file:
+      - ${APP_ENV_FILE:?APP_ENV_FILE is required}
+    environment:
+      APP_ENV: ${DEPLOY_ENV}
+      APP_ENABLE_SCHEDULER: "true"
+      CODE_REPOSITORY_ROOT: /repositories
+    volumes:
+      - type: bind
+        source: ${CODE_REPOSITORY_HOST_ROOT:?CODE_REPOSITORY_HOST_ROOT is required}
+        target: /repositories
+        read_only: true
+    networks:
+      - code-review
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read(); status=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health/scheduler', timeout=5)); assert status.get('enabled') and status.get('running')"]
+      interval: 5s
+      timeout: 6s
+      retries: 24
+      start_period: 10s
+    stop_grace_period: ${APP_STOP_GRACE_PERIOD:-360s}
+
+networks:
+  code-review:
+    name: ${APP_NETWORK:?APP_NETWORK is required}
+    external: true

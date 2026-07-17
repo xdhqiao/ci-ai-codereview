@@ -1,0 +1,75 @@
+pipeline {
+    agent { label 'linux-python' }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '100'))
+        skipDefaultCheckout(true)
+        timestamps()
+        timeout(time: 20, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'PROJECT_ID', defaultValue: '', description: 'Project identifier')
+        string(name: 'REVIEW_VERSION', defaultValue: '', description: 'Version to review')
+        string(name: 'COPY_FROM_VERSION', defaultValue: '0_version', description: 'Base version; 0_version means full scan')
+        string(name: 'REVIEW_VERSION_PATH', defaultValue: '', description: 'Review directory visible to the review server')
+        string(name: 'COPY_FROM_VERSION_PATH', defaultValue: '', description: 'Base directory visible to the review server; required for incremental scan')
+    }
+
+    stages {
+        stage('Checkout Client') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Validate') {
+            steps {
+                sh '''
+                    set -eu
+                    : "${CODE_REVIEW_SERVER_URL:?Configure CODE_REVIEW_SERVER_URL in Jenkins global properties}"
+                    : "${PROJECT_ID:?PROJECT_ID is required}"
+                    : "${REVIEW_VERSION:?REVIEW_VERSION is required}"
+                    : "${COPY_FROM_VERSION:?COPY_FROM_VERSION is required}"
+                    : "${REVIEW_VERSION_PATH:?REVIEW_VERSION_PATH is required}"
+                    if [ "$COPY_FROM_VERSION" != "0_version" ]; then
+                        : "${COPY_FROM_VERSION_PATH:?COPY_FROM_VERSION_PATH is required for incremental review}"
+                    fi
+                    python3 --version
+                '''
+            }
+        }
+
+        stage('Trigger Review') {
+            steps {
+                script {
+                    def response = sh(
+                        returnStdout: true,
+                        script: '''
+                            set -eu
+                            python3 scripts/jenkins_trigger.py \
+                                --server "$CODE_REVIEW_SERVER_URL" \
+                                --project-id "$PROJECT_ID" \
+                                --review-version "$REVIEW_VERSION" \
+                                --copy-from-version "$COPY_FROM_VERSION" \
+                                --review-version-path "$REVIEW_VERSION_PATH" \
+                                --copy-from-version-path "$COPY_FROM_VERSION_PATH" \
+                                --submitter "jenkins:${JOB_NAME}:${BUILD_NUMBER}" \
+                                --timeout 900
+                        '''
+                    ).trim()
+                    writeFile file: 'trigger-response.json', text: "${response}\n"
+                    def task = readJSON text: response
+                    currentBuild.description = "task=${task.id} state=${task.state}"
+                    echo "Review task accepted: id=${task.id}, type=${task.task_type}, state=${task.state}"
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'trigger-response.json', allowEmptyArchive: true
+        }
+    }
+}

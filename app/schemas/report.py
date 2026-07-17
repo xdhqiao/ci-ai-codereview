@@ -94,6 +94,10 @@ class ReportOverviewResponse(BaseModel):
     project_id: str
     review_version: str
     copy_from_version: str
+    view_mode: Literal["latest", "trigger"]
+    trigger_revision: int | None
+    trigger_count: int
+    removed_file_names: list[str]
     task_type: int
     review_mode: str
     state: int

@@ -15,6 +15,9 @@ class TaskModel(Document):
         "indexes": [
             ("project_id", "review_version", "copy_from_version"),
             ("task_type", "state", "create_time"),
+            ("state", "-create_time"),
+            ("task_type", "-create_time"),
+            "-create_time",
             ("-dispatch_priority", "task_type", "state", "create_time"),
             {"fields": ["submission_key"], "unique": True, "sparse": True},
         ],

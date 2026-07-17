@@ -55,6 +55,27 @@ class ReviewScheduler:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
 
+    async def wait_for_shutdown(self, timeout_seconds: int) -> bool:
+        active_future = self._active_future
+        if active_future is None or active_future.done():
+            return True
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(active_future),
+                timeout=max(0, timeout_seconds),
+            )
+        except TimeoutError:
+            logger.warning(
+                "Review worker did not reach a shutdown checkpoint within %s seconds",
+                timeout_seconds,
+            )
+            return False
+        except asyncio.CancelledError:
+            return True
+        except Exception:
+            logger.exception("Review worker failed while the scheduler was shutting down")
+        return True
+
     async def run_once(self) -> None:
         await self._poll()
 

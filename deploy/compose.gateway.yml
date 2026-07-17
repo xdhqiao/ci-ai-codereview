@@ -1,0 +1,26 @@
+services:
+  gateway:
+    image: ${GATEWAY_IMAGE:-nginx:1.27-alpine}
+    container_name: ci-ai-codereview-${DEPLOY_ENV:?DEPLOY_ENV is required}-gateway
+    restart: unless-stopped
+    ports:
+      - "${PUBLIC_BIND_ADDRESS:-0.0.0.0}:${PUBLIC_PORT:-8000}:8000"
+    volumes:
+      - type: bind
+        source: ${GATEWAY_CONFIG_DIR:?GATEWAY_CONFIG_DIR is required}
+        target: /etc/nginx/conf.d
+        read_only: true
+    networks:
+      - code-review
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://127.0.0.1:8000/health"]
+      interval: 5s
+      timeout: 6s
+      retries: 12
+      start_period: 5s
+    stop_grace_period: 30s
+
+networks:
+  code-review:
+    name: ${APP_NETWORK:?APP_NETWORK is required}
+    external: true

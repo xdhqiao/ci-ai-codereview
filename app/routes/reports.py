@@ -24,9 +24,16 @@ def get_task_report(
     author: str = "",
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=300, ge=1, le=300),
+    trigger_revision: int | None = Query(default=None, ge=1),
 ) -> TaskReportResponse:
     response.headers["Cache-Control"] = "no-store"
-    return TaskReportService().get_report(task_id, author=author, page=page, page_size=page_size)
+    return TaskReportService().get_report(
+        task_id,
+        author=author,
+        page=page,
+        page_size=page_size,
+        trigger_revision=trigger_revision,
+    )
 
 
 @router.get("/api/reports/{project_id}/{comparison}.html", response_model=TaskReportResponse)
@@ -37,6 +44,7 @@ def get_task_report_by_comparison(
     author: str = "",
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=300, ge=1, le=300),
+    trigger_revision: int | None = Query(default=None, ge=1),
 ) -> TaskReportResponse:
     response.headers["Cache-Control"] = "no-store"
     return TaskReportService().get_report_by_comparison(
@@ -45,6 +53,7 @@ def get_task_report_by_comparison(
         author=author,
         page=page,
         page_size=page_size,
+        trigger_revision=trigger_revision,
     )
 
 

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>代码审核任务管理</title>
+  <link rel="stylesheet" href="/static/admin_tasks.css?v=20260716-admin1">
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div>
+        <p class="eyebrow">CODE REVIEW ADMIN</p>
+        <h1>审核任务管理</h1>
+      </div>
+      <span id="result-summary" class="result-summary">正在加载...</span>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="filter-band" aria-labelledby="filter-title">
+      <div class="section-heading">
+        <h2 id="filter-title">筛选任务</h2>
+      </div>
+      <form id="filter-form">
+        <label>
+          <span>项目</span>
+          <input id="project-filter" name="project_id" type="search" maxlength="200" autocomplete="off" placeholder="项目 ID">
+        </label>
+        <label>
+          <span>当前版本</span>
+          <input id="version-filter" name="review_version" type="search" maxlength="200" autocomplete="off" placeholder="review_version">
+        </label>
+        <label>
+          <span>开始日期</span>
+          <input id="date-from-filter" name="date_from" type="date">
+        </label>
+        <label>
+          <span>结束日期</span>
+          <input id="date-to-filter" name="date_to" type="date">
+        </label>
+        <label>
+          <span>任务种类</span>
+          <select id="type-filter" name="task_type">
+            <option value="">全部种类</option>
+            <option value="1">增量审核</option>
+            <option value="2">全量审核</option>
+          </select>
+        </label>
+        <label>
+          <span>任务状态</span>
+          <select id="state-filter" name="state">
+            <option value="">全部状态</option>
+            <option value="0">待审核</option>
+            <option value="1">审核中</option>
+            <option value="2">已完成</option>
+            <option value="3">部分完成或失败</option>
+            <option value="4">正在准备</option>
+          </select>
+        </label>
+        <div class="filter-actions">
+          <button class="button-primary" type="submit">搜索</button>
+          <button class="button-secondary" id="reset-filters" type="button">重置</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="task-band" aria-labelledby="task-list-title">
+      <div class="section-heading list-heading">
+        <div>
+          <h2 id="task-list-title">版本列表</h2>
+          <p id="list-range" class="muted"></p>
+        </div>
+        <span class="muted">点击当前版本查看审核报告</span>
+      </div>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col" data-column="project_id"><button class="sort-button" data-sort="project_id" type="button">项目 ID<span class="sort-indicator"></span></button></th>
+              <th scope="col" data-column="review_version"><button class="sort-button" data-sort="review_version" type="button">当前版本<span class="sort-indicator"></span></button></th>
+              <th scope="col" data-column="copy_from_version"><button class="sort-button" data-sort="copy_from_version" type="button">对比版本<span class="sort-indicator"></span></button></th>
+              <th scope="col" data-column="state"><button class="sort-button" data-sort="state" type="button">任务状态<span class="sort-indicator"></span></button></th>
+              <th scope="col" data-column="task_type"><button class="sort-button" data-sort="task_type" type="button">任务种类<span class="sort-indicator"></span></button></th>
+              <th scope="col" data-column="score"><button class="sort-button numeric" data-sort="score" type="button">任务总分<span class="sort-indicator"></span></button></th>
+              <th scope="col" data-column="critical_issue_count"><button class="sort-button numeric" data-sort="critical_issue_count" type="button">严重问题数<span class="sort-indicator"></span></button></th>
+              <th scope="col" data-column="issue_count"><button class="sort-button numeric" data-sort="issue_count" type="button">问题总数<span class="sort-indicator"></span></button></th>
+              <th scope="col" data-column="create_time"><button class="sort-button" data-sort="create_time" type="button">创建时间<span class="sort-indicator"></span></button></th>
+            </tr>
+          </thead>
+          <tbody id="task-list"></tbody>
+        </table>
+      </div>
+
+      <p id="empty-state" class="empty" hidden>没有符合当前条件的审核任务。</p>
+      <div id="error-state" class="error-state" role="alert" hidden>
+        <strong>任务列表加载失败</strong>
+        <p id="error-message"></p>
+        <button id="retry-load" class="button-secondary" type="button">重新加载</button>
+      </div>
+      <nav id="pagination" class="pagination" aria-label="任务列表分页" hidden></nav>
+    </section>
+  </main>
+
+  <script src="/static/admin_tasks.js?v=20260716-admin1" defer></script>
+</body>
+</html>
+

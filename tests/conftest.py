@@ -15,6 +15,7 @@ from app.main import app
 from app.models.code_file import CodeFileModel
 from app.models.project import ProjectModel
 from app.models.task import TaskModel
+from app.models.task_trigger import TaskTriggerModel
 
 
 @pytest.fixture(autouse=True)
@@ -23,11 +24,13 @@ def clean_database():
     settings = get_settings()
     connect_to_mongo(settings)
     TaskModel.drop_collection()
+    TaskTriggerModel.drop_collection()
     CodeFileModel.drop_collection()
     ProjectModel.drop_collection()
     yield
     connect_to_mongo(settings)
     TaskModel.drop_collection()
+    TaskTriggerModel.drop_collection()
     CodeFileModel.drop_collection()
     ProjectModel.drop_collection()
     disconnect_mongo(settings)

@@ -1,5 +1,6 @@
 from app.models.code_file import CodeBlock, CodeFileModel, Issue, ModelRoundTrace, ToolCallTrace
 from app.models.task import TaskModel
+from app.models.task_trigger import TaskTriggerModel
 
 
 def _score_block(block_id: int, score: int, contents: list[str], issues: list[Issue]) -> CodeBlock:
@@ -186,6 +187,60 @@ def test_report_page_and_page_size_limit(client):
     assert canonical_api.json()["overview"]["task_id"] == str(task.id)
     assert client.get("/demo-c/missing_vs_master.html").status_code == 404
     assert client.get(f"/api/reports/tasks/{task.id}", params={"page_size": 301}).status_code == 422
+
+
+def test_trigger_report_filters_file_selection_but_reads_latest_code_file(client):
+    task, auth_file, _ = _create_report_data()
+    task.trigger_count = 2
+    task.trigger_revision = 2
+    task.save()
+    TaskTriggerModel(
+        task_id=str(task.id),
+        project_id=task.project_id,
+        review_version=task.review_version,
+        copy_from_version=task.copy_from_version,
+        trigger_revision=1,
+        report_file_names=["src/auth.c"],
+        changed_file_names=["src/auth.c"],
+    ).save()
+    TaskTriggerModel(
+        task_id=str(task.id),
+        project_id=task.project_id,
+        review_version=task.review_version,
+        copy_from_version=task.copy_from_version,
+        trigger_revision=2,
+        report_file_names=[],
+        reused_file_names=["src/auth.c", "src/math.c"],
+    ).save()
+
+    auth_file.code_blocks[0].contents = ["    77+  int latest_revision = 1;"]
+    auth_file.code_blocks[0].comment = "latest review only"
+    auth_file.save()
+
+    response = client.get(
+        "/api/reports/demo-c/feature_vs_master.html",
+        params={"trigger_revision": 1},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["overview"]["view_mode"] == "trigger"
+    assert body["overview"]["trigger_revision"] == 1
+    assert body["overview"]["trigger_count"] == 2
+    assert body["pagination"]["total_items"] == 1
+    assert [item["file_name"] for item in body["files"]] == ["src/auth.c"]
+    assert body["files"][0]["blocks"][0]["contents"] == ["    77+  int latest_revision = 1;"]
+    assert body["files"][0]["blocks"][0]["comment"] == "latest review only"
+    no_change = client.get(
+        f"/api/reports/tasks/{task.id}",
+        params={"trigger_revision": 2},
+    ).json()
+    assert no_change["pagination"]["total_items"] == 0
+    assert no_change["progress"]["percentage"] == 100
+    assert client.get(
+        f"/api/reports/tasks/{task.id}",
+        params={"trigger_revision": 99},
+    ).status_code == 404
 
 
 def test_report_frontend_has_no_external_css_or_javascript(client):

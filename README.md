@@ -12,6 +12,9 @@ app/
   schemas/     Pydantic 请求和响应模型
   services/    扫描、diff、prompt、LLM、工具调用和调度逻辑
   static/      审核报告页面、样式和交互脚本
+deploy/        单机蓝绿部署的 Compose 与切换脚本
+jenkins/       审核触发、开发 CI/CD、生产发布三个 Jenkinsfile
+docs/          Jenkins、GitLab 和部署运维说明
 tests/         pytest 测试
 ```
 
@@ -42,9 +45,11 @@ pytest
 - `POST /tasks/{task_id}/review`：执行审核流程。任务开始时 `state=1`，所有文件审核完成后 `state=2`；存在预算跳过或 main_task 未闭环的文件时为 `state=3`、`completion_status=partial`。
 - `POST /tasks/{task_id}/retry-failures`：异步续审失败或未闭环的 Block，返回 `202`。人工续审优先级高于普通增量和全量任务，已完成 Block 不会重跑。
 - `GET /code-files`、`GET /code-files/{code_file_id}`：查询落库后的文件审核结果。
+- `GET /admin/tasks.html`：后台任务管理页面，支持项目/版本/日期/种类/状态筛选、全列排序和每页 20 条分页。
+- `GET /api/admin/tasks`：后台任务列表数据接口，支持 `project_id`、`review_version`、`date_from`、`date_to`、`task_type`、`state`、`sort_by`、`sort_order`、`page`、`page_size`。
 - `GET /{project_id}/{review_version}_vs_{copy_from_version}.html`：打开一个任务的增量或全量审核报告页面。
-- `GET /api/reports/tasks/{task_id}`：获取报告聚合数据；支持 `author`、`page`、`page_size`，默认及最大每页 300 个文件。
-- `GET /api/reports/{project_id}/{review_version}_vs_{copy_from_version}.html`：按项目和版本组合获取同一份报告数据。
+- `GET /api/reports/tasks/{task_id}`：获取报告聚合数据；支持 `author`、`page`、`page_size`、`trigger_revision`，默认及最大每页 300 个文件。
+- `GET /api/reports/{project_id}/{review_version}_vs_{copy_from_version}.html`：按项目和版本组合获取同一份报告数据；传 `trigger_revision` 时只展示该轮发生变化的文件。
 - `POST /api/feedback/{file_id}/{block_id}/{issue_id}`：保存 issue 反馈。赞成传 `feedback_type=agree`；反对传 `feedback_type=reject` 和非空 `feedback_content`。
 
 ## Client 与 Server
@@ -63,13 +68,15 @@ python scripts/jenkins_trigger.py \
 
 Jenkins 参数中的路径必须是 server 进程可见的路径。Compose 默认把宿主 `CODE_REPOSITORY_HOST_ROOT=./demo_repos` 只读映射到容器 `CODE_REPOSITORY_CONTAINER_ROOT=/repositories`；Jenkins 应传容器路径。Jenkins 与 server 不在同一机器时，应把仓库放到双方约定的共享存储，或先同步到 server 的挂载目录。
 
-触发阶段按全局 `REVIEW_EXCLUDE_PATHS`、目录排除规则和 `ProjectModel.exclude_path` 过滤文件，被排除文件不会创建 `CodeFileModel`。相同五元组参数重复触发时复用同一 Task，累计 token、LLM 调用次数和耗时；MD5 未变化的已完成 Block 原样保留，变化的 Block 清空审核结果并回到待审状态。
+三个 Jenkins Job 的创建、凭据、GitLab Registry、不可变制品、生产审批和蓝绿部署操作见 [Jenkins 与 GitLab 部署说明](docs/jenkins-deployment.md)。
+
+触发阶段按全局 `REVIEW_EXCLUDE_PATHS`、目录排除规则和 `ProjectModel.exclude_path` 过滤文件，被排除文件不会创建 `CodeFileModel`。相同 `project_id + review_version + copy_from_version` 重复触发时复用同一 Task，物理目录更新为本轮 Jenkins workspace，累计 token、LLM 调用次数和耗时；MD5 未变化的已完成 Block 原样保留，变化的 Block 清空审核结果并回到待审状态。每轮新增、变化、复用和移除的文件名保存在 `ai_codereview_task_trigger`。
 
 server 默认每 5 秒扫描一次。人工失败项续审优先级最高，其次是增量任务，再次是全量任务；同优先级按 `create_time` FIFO。高优先级任务到达后，低优先级任务会协作式中断，并在下一次领取时从已落库的未完成 Block 继续。`state=0/1/2/3/4` 分别表示待审、审核中、完成、部分完成或失败、触发准备中。租约和心跳用于服务重启及多实例恢复，过期租约会被重新领取。自动重试采用指数退避；人工续审通过独立调度字段排队，不靠清空审核结果。每个 Block 完成后立即落库，不需要等待整个项目完成；任务完成后调用当前仅记录 demo 日志的邮件通知函数。
 
 ## 审核报告
 
-任务创建后即可访问 `http://localhost:8000/{project_id}/{review_version}_vs_{copy_from_version}.html`。当同一项目和版本组合存在多条任务时，页面使用创建时间最新的一条。报告每 5 秒静默刷新待审、审核中和续审任务，展示文件/Block 进度、失败数、五维雷达图、token 与工具调用统计、当前负责人范围内最高 severity 问题，以及分页文件/Block/Issue 详情。审核进度严格按“成功完成的 Block 数 / 总 Block 数”计算，失败 Block 不计入已审核。只有进度不足 100%、不存在待审或审核中 Block、且至少存在一个失败 Block 时，“重新审核失败项”按钮才可点击；审核仍在进行或已经 100% 完成时按钮禁用。增量报告的代码区直接读取 `CodeBlock.contents` 中的 diff 与上下文；全量报告读取同一字段中的完整代码，代码框支持横向和纵向滚动。Issue 行号直接读取 `Issue.issue_line_numbers`。
+任务创建后即可访问 `http://localhost:8000/{project_id}/{review_version}_vs_{copy_from_version}.html`，该固定链接始终展示当前 review 目录相对基线的全部最新结果。追加 `?trigger_revision=N` 可只展示第 N 次触发涉及的文件；文件内容、评分和 Issue 仍从最新 `CodeFileModel` 读取，不回放过时审核结果。报告每 5 秒静默刷新待审、审核中和续审任务，展示文件/Block 进度、失败数、五维雷达图、token 与工具调用统计、当前负责人范围内最高 severity 问题，以及分页文件/Block/Issue 详情。审核进度严格按“成功完成的 Block 数 / 总 Block 数”计算，失败 Block 不计入已审核。只有进度不足 100%、不存在待审或审核中 Block、且至少存在一个失败 Block 时，“重新审核失败项”按钮才可点击；审核仍在进行或已经 100% 完成时按钮禁用。增量报告的代码区直接读取 `CodeBlock.contents` 中的 diff 与上下文；全量报告读取同一字段中的完整代码，代码框支持横向和纵向滚动。Issue 行号直接读取 `Issue.issue_line_numbers`。
 
 任务和文件五维分数按 Block 变更行数加权平均，增量扫描的权重为 Block 中 `+`、`-` 行数，全量扫描为 Block 全部代码行数；总分是五维分数的平均数。`file_author` 只作为已有数据的只读筛选条件，全部为空时页面不显示负责人菜单。`issue_show` 和 `file_author` 均不会由当前审核流程自动处理或写入。
 

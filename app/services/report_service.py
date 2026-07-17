@@ -9,6 +9,7 @@ from mongoengine import ValidationError
 from app.core.exceptions import NotFoundError
 from app.models.code_file import CodeBlock, CodeFileModel, Issue
 from app.models.task import TaskModel
+from app.models.task_trigger import TaskTriggerModel
 from app.schemas.report import (
     CriticalIssueResponse,
     FeedbackRequest,
@@ -50,6 +51,7 @@ class TaskReportService:
         author: str = "",
         page: int = 1,
         page_size: int = 300,
+        trigger_revision: int | None = None,
     ) -> TaskReportResponse:
         task = self.find_task_by_comparison(project_id, comparison)
         return self.get_report(
@@ -57,6 +59,7 @@ class TaskReportService:
             author=author,
             page=page,
             page_size=page_size,
+            trigger_revision=trigger_revision,
         )
 
     def find_task_by_comparison(self, project_id: str, comparison: str) -> TaskModel:
@@ -85,9 +88,22 @@ class TaskReportService:
         author: str = "",
         page: int = 1,
         page_size: int = 300,
+        trigger_revision: int | None = None,
     ) -> TaskReportResponse:
         task = self._find_task(task_id)
-        all_files = list(CodeFileModel.objects(task_id=str(task.id)).order_by("file_name"))
+        current_files = list(CodeFileModel.objects(task_id=str(task.id)).order_by("file_name"))
+        trigger_snapshot = None
+        if trigger_revision is not None:
+            trigger_snapshot = TaskTriggerModel.objects(
+                task_id=str(task.id),
+                trigger_revision=trigger_revision,
+            ).first()
+            if trigger_snapshot is None:
+                raise NotFoundError("Task trigger snapshot not found")
+            report_names = set(trigger_snapshot.report_file_names or [])
+            all_files = [code_file for code_file in current_files if code_file.file_name in report_names]
+        else:
+            all_files = current_files
         authors = sorted({value.file_author.strip() for value in all_files if (value.file_author or "").strip()})
         selected_author = author.strip()
         if selected_author and selected_author not in authors:
@@ -144,6 +160,10 @@ class TaskReportService:
                 project_id=task.project_id,
                 review_version=task.review_version,
                 copy_from_version=task.copy_from_version,
+                view_mode="trigger" if trigger_snapshot is not None else "latest",
+                trigger_revision=trigger_revision,
+                trigger_count=task.trigger_count or 0,
+                removed_file_names=list(trigger_snapshot.removed_file_names or []) if trigger_snapshot else [],
                 task_type=task.task_type or 0,
                 review_mode="incremental" if task.task_type == TASK_TYPE_INCREMENTAL else "full",
                 state=task.state,
@@ -288,6 +308,8 @@ class TaskReportService:
             percentage = round(completed_blocks * 100 / total_blocks)
         elif code_files:
             percentage = round(file_statuses.count("completed") * 100 / len(code_files))
+        elif task.state == 2:
+            percentage = 100
         else:
             percentage = 0
         retry_in_progress = bool(task.retry_failed_only) and task.state in {0, 1}

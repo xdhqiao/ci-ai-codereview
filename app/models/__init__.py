@@ -1,6 +1,7 @@
 from app.models.code_file import CodeBlock, CodeFileModel, Issue, ModelRoundTrace, ToolCallTrace
 from app.models.project import ProjectModel, Review
 from app.models.task import TaskModel
+from app.models.task_trigger import TaskTriggerModel
 
 __all__ = [
     "CodeBlock",
@@ -10,5 +11,6 @@ __all__ = [
     "ProjectModel",
     "Review",
     "TaskModel",
+    "TaskTriggerModel",
     "ToolCallTrace",
 ]
