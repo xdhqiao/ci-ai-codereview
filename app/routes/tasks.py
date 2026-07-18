@@ -18,6 +18,7 @@ def create_task(payload: TaskCreate) -> TaskResponse:
         copy_from_version=payload.copy_from_version,
         review_version_path=payload.review_version_path,
         copy_from_version_path=payload.copy_from_version_path,
+        author_map_file=payload.author_map_file,
         task_type=payload.task_type,
         state=payload.state,
         submitter=payload.submitter,

@@ -6,10 +6,13 @@ from datetime import datetime, timezone
 
 from mongoengine import ValidationError
 
+from app.common.constant import SEVERE_ISSUE_SEVERITY, is_incremental_task_type
+from app.common.utils import get_user_display_name
 from app.core.exceptions import NotFoundError
 from app.models.code_file import CodeBlock, CodeFileModel, Issue
+from app.models.code_file_snapshot import CodeFileSnapshotModel
 from app.models.task import TaskModel
-from app.models.task_trigger import TaskTriggerModel
+from app.models.task_snapshot import TaskSnapshotModel
 from app.schemas.report import (
     CriticalIssueResponse,
     FeedbackRequest,
@@ -24,7 +27,7 @@ from app.schemas.report import (
     ScoreResponse,
     TaskReportResponse,
 )
-from app.services.diff_service import TASK_TYPE_INCREMENTAL
+from app.services.task_snapshot import TaskSnapshotService
 
 
 SCORE_FIELDS = (
@@ -91,19 +94,98 @@ class TaskReportService:
         trigger_revision: int | None = None,
     ) -> TaskReportResponse:
         task = self._find_task(task_id)
-        current_files = list(CodeFileModel.objects(task_id=str(task.id)).order_by("file_name"))
-        trigger_snapshot = None
         if trigger_revision is not None:
-            trigger_snapshot = TaskTriggerModel.objects(
+            snapshot = TaskSnapshotModel.objects(
                 task_id=str(task.id),
                 trigger_revision=trigger_revision,
             ).first()
-            if trigger_snapshot is None:
-                raise NotFoundError("Task trigger snapshot not found")
-            report_names = set(trigger_snapshot.report_file_names or [])
-            all_files = [code_file for code_file in current_files if code_file.file_name in report_names]
-        else:
-            all_files = current_files
+            if snapshot is None:
+                raise NotFoundError("Task snapshot not found")
+            return self._snapshot_report(
+                snapshot,
+                author=author,
+                page=page,
+                page_size=page_size,
+            )
+        all_files = list(CodeFileModel.objects(task_id=str(task.id)).order_by("file_name"))
+        return self._build_report(
+            task,
+            all_files,
+            author=author,
+            page=page,
+            page_size=page_size,
+            view_mode="latest",
+        )
+
+    def get_snapshot_report(
+        self,
+        snapshot_id: str,
+        project_id: str,
+        comparison: str,
+        *,
+        author: str = "",
+        page: int = 1,
+        page_size: int = 300,
+    ) -> TaskReportResponse:
+        snapshot = self.find_snapshot(snapshot_id, project_id, comparison)
+        return self._snapshot_report(
+            snapshot,
+            author=author,
+            page=page,
+            page_size=page_size,
+        )
+
+    def find_snapshot(
+        self,
+        snapshot_id: str,
+        project_id: str,
+        comparison: str,
+    ) -> TaskSnapshotModel:
+        if "_vs_" not in comparison:
+            raise NotFoundError("Review snapshot not found")
+        review_version, copy_from_version = comparison.rsplit("_vs_", 1)
+        snapshot = TaskSnapshotModel.objects(
+            snapshot_id=snapshot_id,
+            project_id=project_id,
+            review_version=review_version,
+            copy_from_version=copy_from_version,
+        ).first()
+        if snapshot is None:
+            raise NotFoundError("Review snapshot not found")
+        return snapshot
+
+    def _snapshot_report(
+        self,
+        snapshot: TaskSnapshotModel,
+        *,
+        author: str,
+        page: int,
+        page_size: int,
+    ) -> TaskReportResponse:
+        all_files = list(
+            CodeFileSnapshotModel.objects(snapshot_id=snapshot.snapshot_id).order_by("file_name")
+        )
+        return self._build_report(
+            snapshot,
+            all_files,
+            author=author,
+            page=page,
+            page_size=page_size,
+            view_mode="snapshot",
+            snapshot=snapshot,
+        )
+
+    def _build_report(
+        self,
+        task: TaskModel | TaskSnapshotModel,
+        all_files: list[CodeFileModel] | list[CodeFileSnapshotModel],
+        *,
+        author: str,
+        page: int,
+        page_size: int,
+        view_mode: str,
+        snapshot: TaskSnapshotModel | None = None,
+    ) -> TaskReportResponse:
         authors = sorted({value.file_author.strip() for value in all_files if (value.file_author or "").strip()})
         selected_author = author.strip()
         if selected_author and selected_author not in authors:
@@ -156,16 +238,18 @@ class TaskReportService:
 
         return TaskReportResponse(
             overview=ReportOverviewResponse(
-                task_id=str(task.id),
+                task_id=snapshot.task_id if snapshot is not None else str(task.id),
                 project_id=task.project_id,
                 review_version=task.review_version,
                 copy_from_version=task.copy_from_version,
-                view_mode="trigger" if trigger_snapshot is not None else "latest",
-                trigger_revision=trigger_revision,
+                view_mode=view_mode,
+                snapshot_id=snapshot.snapshot_id if snapshot is not None else "",
+                snapshot_url=TaskSnapshotService.report_path(snapshot) if snapshot is not None else "",
+                trigger_revision=snapshot.trigger_revision if snapshot is not None else None,
                 trigger_count=task.trigger_count or 0,
-                removed_file_names=list(trigger_snapshot.removed_file_names or []) if trigger_snapshot else [],
+                removed_file_names=list(snapshot.removed_file_names or []) if snapshot is not None else [],
                 task_type=task.task_type or 0,
-                review_mode="incremental" if task.task_type == TASK_TYPE_INCREMENTAL else "full",
+                review_mode="incremental" if is_incremental_task_type(task.task_type) else "full",
                 state=task.state,
                 completion_status=task.completion_status or "",
                 create_time=task.create_time,
@@ -186,7 +270,9 @@ class TaskReportService:
                 code_block_num=sum(len(code_file.code_blocks) for code_file in all_files),
                 issue_num=len(valid_issues),
                 filtered_issue_num=filtered_issue_num,
-                critical_issue_num=sum(1 for issue in valid_issues if issue.severity >= 4),
+                critical_issue_num=sum(
+                    1 for issue in valid_issues if issue.severity == SEVERE_ISSUE_SEVERITY
+                ),
                 tool_call_num=tool_call_num,
                 model_round_num=model_round_num,
                 memory_compression_num=memory_compression_num,
@@ -194,6 +280,7 @@ class TaskReportService:
             ),
             progress=progress,
             authors=authors,
+            author_name_map={author: get_user_display_name(author) for author in authors},
             selected_author=selected_author,
             highest_severity=highest_severity,
             critical_issues=critical_issues,
@@ -217,6 +304,11 @@ class TaskReportService:
             code_file = CodeFileModel.objects(id=file_id).first()
         except (ValidationError, ValueError):
             code_file = None
+        if code_file is None:
+            try:
+                code_file = CodeFileSnapshotModel.objects(id=file_id).first()
+            except (ValidationError, ValueError):
+                code_file = None
         if code_file is None:
             raise NotFoundError("Code file not found")
 
@@ -247,13 +339,18 @@ class TaskReportService:
             raise NotFoundError("Task not found")
         return task
 
-    def _file_response(self, code_file: CodeFileModel, task_type: int) -> ReportFileResponse:
+    def _file_response(
+        self,
+        code_file: CodeFileModel | CodeFileSnapshotModel,
+        task_type: int,
+    ) -> ReportFileResponse:
         weighted = self._weighted_scores([code_file], task_type)
         block_statuses = [self._block_status(block, code_file) for block in code_file.code_blocks]
         return ReportFileResponse(
             file_id=str(code_file.id),
             file_name=code_file.file_name,
             file_author=(code_file.file_author or "").strip(),
+            file_author_name=get_user_display_name((code_file.file_author or "").strip()),
             review_state=code_file.state or 0,
             status=self._file_status(code_file),
             completed_block_num=sum(1 for status in block_statuses if status == "completed"),
@@ -290,8 +387,8 @@ class TaskReportService:
 
     def _progress_response(
         self,
-        task: TaskModel,
-        code_files: list[CodeFileModel],
+        task: TaskModel | TaskSnapshotModel,
+        code_files: list[CodeFileModel] | list[CodeFileSnapshotModel],
     ) -> ReportProgressResponse:
         block_statuses_by_file = [
             (code_file, [self._block_status(block, code_file) for block in code_file.code_blocks])
@@ -343,7 +440,7 @@ class TaskReportService:
             auto_refresh_seconds=5,
         )
 
-    def _file_status(self, code_file: CodeFileModel) -> str:
+    def _file_status(self, code_file: CodeFileModel | CodeFileSnapshotModel) -> str:
         statuses = [self._block_status(block, code_file) for block in code_file.code_blocks]
         extra_status = str((code_file.extra or {}).get("status") or "")
         if extra_status == "skipped_budget":
@@ -356,7 +453,11 @@ class TaskReportService:
             return "failed"
         return "pending"
 
-    def _block_status(self, block: CodeBlock, code_file: CodeFileModel | None = None) -> str:
+    def _block_status(
+        self,
+        block: CodeBlock,
+        code_file: CodeFileModel | CodeFileSnapshotModel | None = None,
+    ) -> str:
         if block.failure_message or block.review_state == 3:
             return "failed"
         if block.main_task_completed or block.review_state == 2:
@@ -369,7 +470,7 @@ class TaskReportService:
             return "reviewing"
         return "pending"
 
-    def _live_process_time(self, task: TaskModel) -> int:
+    def _live_process_time(self, task: TaskModel | TaskSnapshotModel) -> int:
         process_time = int(task.process_time or 0)
         if task.state != 1 or task.last_start_time is None:
             return process_time
@@ -392,18 +493,21 @@ class TaskReportService:
 
     def _critical_issues(
         self,
-        code_files: list[CodeFileModel],
+        code_files: list[CodeFileModel] | list[CodeFileSnapshotModel],
     ) -> tuple[list[CriticalIssueResponse], int | None]:
-        candidates: list[tuple[CodeFileModel, CodeBlock, Issue]] = []
+        candidates: list[tuple[CodeFileModel | CodeFileSnapshotModel, CodeBlock, Issue]] = []
         for code_file in code_files:
             for block in code_file.code_blocks:
                 for issue in block.issues:
                     if self._is_reportable_issue(issue):
                         candidates.append((code_file, block, issue))
+        candidates = [
+            item for item in candidates if (item[2].severity or 0) == SEVERE_ISSUE_SEVERITY
+        ]
         if not candidates:
             return [], None
-        highest_severity = max(issue.severity or 0 for _, _, issue in candidates)
-        highest = [item for item in candidates if (item[2].severity or 0) == highest_severity]
+        highest_severity = SEVERE_ISSUE_SEVERITY
+        highest = candidates
         highest.sort(key=lambda item: (item[0].file_name, item[1].block_id, item[2].issue_id or 0))
         return [
             CriticalIssueResponse(
@@ -412,6 +516,7 @@ class TaskReportService:
                 issue_id=issue.issue_id if issue.issue_id is not None else 0,
                 file_name=code_file.file_name,
                 file_author=(code_file.file_author or "").strip(),
+                file_author_name=get_user_display_name((code_file.file_author or "").strip()),
                 severity=issue.severity or 0,
                 issue_line_numbers=issue.issue_line_numbers or "",
                 type=issue.type or "",
@@ -421,7 +526,11 @@ class TaskReportService:
             for code_file, block, issue in highest
         ], highest_severity
 
-    def _weighted_scores(self, code_files: list[CodeFileModel], task_type: int) -> WeightedScores:
+    def _weighted_scores(
+        self,
+        code_files: list[CodeFileModel] | list[CodeFileSnapshotModel],
+        task_type: int,
+    ) -> WeightedScores:
         totals = {field: 0 for field in SCORE_FIELDS}
         total_weight = 0
         for code_file in code_files:
@@ -439,7 +548,7 @@ class TaskReportService:
 
     def _block_weight(self, block: CodeBlock, task_type: int) -> int:
         lines = list(block.contents or [])
-        if task_type == TASK_TYPE_INCREMENTAL:
+        if is_incremental_task_type(task_type):
             changed = sum(1 for line in lines if len(line) > 6 and line[6] in {"+", "-"})
         else:
             changed = len(lines)

@@ -4,7 +4,7 @@ const SORT_FIELDS = new Set([
   'score', 'critical_issue_count', 'issue_count', 'create_time',
 ]);
 const DESCENDING_FIRST = new Set(['score', 'critical_issue_count', 'issue_count', 'create_time']);
-const TYPE_VALUES = new Set(['1', '2']);
+const TYPE_VALUES = new Set(['1', '2', '3']);
 const STATE_VALUES = new Set(['0', '1', '2', '3', '4']);
 
 const defaultState = () => ({
@@ -237,7 +237,7 @@ function stateBadge(state) {
 }
 
 function typeBadge(type) {
-  const types = { 1: ['增量审核', 'incremental'], 2: ['全量审核', 'full'] };
+  const types = { 1: ['轮询版', 'incremental'], 2: ['正式版', 'incremental'], 3: ['全量审核', 'full'] };
   const [label, className] = types[type] || [`类型 ${type}`, 'full'];
   const badge = document.createElement('span');
   badge.className = `type-badge type-${className}`;

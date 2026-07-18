@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>维护人反馈明细</title>
+  <link rel="stylesheet" href="/static/author_issue_report.css?v=20260718-author1">
+</head>
+<body>
+  <header class="topbar"><div class="shell topbar-inner"><div><p class="eyebrow">ISSUE FEEDBACK REPORT</p><h1 id="page-title">维护人反馈明细</h1><p id="scope-label" class="muted"></p></div><a href="/admin/feedback.html">反馈管理</a></div></header>
+  <main class="shell">
+    <section aria-labelledby="summary-title"><h2 id="summary-title">汇总</h2><div id="summary-grid" class="summary-grid"></div></section>
+    <section aria-labelledby="issue-title">
+      <div class="section-heading"><div><h2 id="issue-title">问题列表</h2><p id="list-range" class="muted"></p></div></div>
+      <div class="table-scroll"><table><thead><tr><th>NO</th><th>文件名</th><th>严重度</th><th>变更代码</th><th>问题描述</th><th>修复建议</th><th>赞成/反对</th></tr></thead><tbody id="issue-list"></tbody></table></div>
+      <p id="empty-state" class="empty" hidden>当前范围没有审核问题。</p>
+      <div id="error-state" class="error-state" hidden><strong>明细加载失败</strong><p id="error-message"></p><button id="retry-load" class="button-secondary" type="button">重新加载</button></div>
+      <nav id="pagination" class="pagination" aria-label="问题列表分页" hidden></nav>
+    </section>
+  </main>
+  <div id="code-popover" class="code-popover" role="tooltip" hidden><strong>相关代码</strong><pre id="code-preview"></pre></div>
+  <dialog id="reject-dialog"><form id="reject-form"><div class="dialog-heading"><h2>填写反对原因</h2><button id="reject-close" class="icon-button" type="button" aria-label="关闭">×</button></div><textarea id="reject-reason" rows="5" maxlength="4000" required></textarea><div class="dialog-actions"><button id="reject-cancel" class="button-secondary" type="button">取消</button><button class="button-danger" type="submit">保存反对</button></div></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <div id="loading" class="loading">正在加载维护人问题...</div>
+  <script src="/static/author_issue_report.js?v=20260718-empty-author2" defer></script>
+</body>
+</html>

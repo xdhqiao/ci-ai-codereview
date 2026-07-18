@@ -6,18 +6,18 @@ from datetime import datetime, timedelta, timezone
 from mongoengine import ValidationError
 from mongoengine.queryset.visitor import Q
 
+from app.common.constant import MANUAL_RETRY_PRIORITY, ReviewState, TaskState
 from app.core.config import Settings, get_settings
 from app.core.exceptions import AppError, NotFoundError
 from app.models.code_file import CodeFileModel
 from app.models.task import TaskModel
 
 
-TASK_STATE_PENDING = 0
-TASK_STATE_RUNNING = 1
-TASK_STATE_COMPLETED = 2
-TASK_STATE_PARTIAL = 3
-TASK_STATE_PREPARING = 4
-MANUAL_RETRY_PRIORITY = 100
+TASK_STATE_PENDING = TaskState.PENDING.value
+TASK_STATE_RUNNING = TaskState.RUNNING.value
+TASK_STATE_COMPLETED = TaskState.COMPLETED.value
+TASK_STATE_PARTIAL = TaskState.PARTIAL.value
+TASK_STATE_PREPARING = TaskState.PREPARING.value
 
 
 def utc_now() -> datetime:
@@ -47,11 +47,11 @@ def retryable_failure_summary(task_id: str) -> RetryableFailureSummary:
             continue
         failed_blocks = 0
         for block in code_file.code_blocks:
-            if block.failure_message or block.review_state == 3:
+            if block.failure_message or block.review_state == ReviewState.FAILED.value:
                 failed_blocks += 1
-            elif block.main_task_completed or block.review_state == 2 or file_status in {"reviewed", "resumed"}:
+            elif block.main_task_completed or block.review_state == ReviewState.COMPLETED.value or file_status in {"reviewed", "resumed"}:
                 continue
-            elif block.review_state == 1:
+            elif block.review_state == ReviewState.RUNNING.value:
                 reviewing_block_num += 1
             else:
                 pending_block_num += 1

@@ -11,7 +11,7 @@ def _task(project_id: str, task_type: int, state: int, created_at: datetime) -> 
     return TaskModel(
         project_id=project_id,
         review_version="review",
-        copy_from_version="master" if task_type == 1 else "0_version",
+        copy_from_version="0_version" if task_type == 3 else "master",
         task_type=task_type,
         state=state,
         trigger_revision=1,
@@ -21,16 +21,16 @@ def _task(project_id: str, task_type: int, state: int, created_at: datetime) -> 
 
 def test_scheduler_prioritizes_incremental_then_fifo():
     now = datetime.now(timezone.utc)
-    _task("full-old", 2, 0, now - timedelta(minutes=10))
+    _task("full-old", 3, 0, now - timedelta(minutes=10))
     incremental_new = _task("incremental-new", 1, 0, now - timedelta(minutes=1))
-    _task("incremental-old", 1, 0, now - timedelta(minutes=5))
+    _task("incremental-old", 2, 0, now - timedelta(minutes=5))
     scheduler = ReviewScheduler(Settings(scheduler_lease_seconds=60))
 
     claimed = scheduler.claim_next_task()
 
     assert claimed is not None
     assert claimed.project_id == "incremental-old"
-    assert claimed.task_type == 1
+    assert claimed.task_type == 2
     assert claimed.state == 1
     assert claimed.lease_owner == scheduler.worker_id
     assert claimed.lease_token
@@ -41,7 +41,7 @@ def test_scheduler_prioritizes_incremental_then_fifo():
 def test_scheduler_prioritizes_manual_failed_retry_above_incremental():
     now = datetime.now(timezone.utc)
     incremental = _task("incremental", 1, 0, now - timedelta(minutes=5))
-    manual_full_retry = _task("manual-full-retry", 2, 0, now - timedelta(minutes=1))
+    manual_full_retry = _task("manual-full-retry", 3, 0, now - timedelta(minutes=1))
     manual_full_retry.dispatch_priority = 100
     manual_full_retry.retry_failed_only = True
     manual_full_retry.completion_status = "retry_pending"
@@ -91,7 +91,7 @@ def test_scheduler_reclaims_stale_running_task():
 
 def test_scheduler_claims_pending_task_when_lease_field_is_missing():
     now = datetime.now(timezone.utc)
-    pending = _task("missing-lease", 2, 0, now - timedelta(minutes=1))
+    pending = _task("missing-lease", 3, 0, now - timedelta(minutes=1))
     TaskModel._get_collection().update_one(
         {"_id": pending.id},
         {"$unset": {"lease_token": "", "lease_owner": "", "lease_expires_at": ""}},
@@ -108,7 +108,7 @@ def test_scheduler_claims_pending_task_when_lease_field_is_missing():
 
 def test_scheduler_claims_manual_retry_when_legacy_trigger_revision_is_missing():
     now = datetime.now(timezone.utc)
-    retry = _task("legacy-manual-retry", 2, 0, now - timedelta(minutes=1))
+    retry = _task("legacy-manual-retry", 3, 0, now - timedelta(minutes=1))
     retry.dispatch_priority = 100
     retry.retry_failed_only = True
     retry.completion_status = "retry_pending"
@@ -130,8 +130,8 @@ def test_scheduler_claims_manual_retry_when_legacy_trigger_revision_is_missing()
 
 def test_waiting_incremental_is_detected_for_full_scan_preemption():
     now = datetime.now(timezone.utc)
-    _task("full", 2, 1, now - timedelta(minutes=2))
-    _task("incremental", 1, 0, now - timedelta(minutes=1))
+    _task("full", 3, 1, now - timedelta(minutes=2))
+    _task("incremental", 2, 0, now - timedelta(minutes=1))
 
     scheduler = ReviewScheduler(Settings())
 

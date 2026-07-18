@@ -65,6 +65,7 @@ class ReportFileResponse(BaseModel):
     file_id: str
     file_name: str
     file_author: str
+    file_author_name: str
     review_state: int
     status: str
     completed_block_num: int
@@ -82,6 +83,7 @@ class CriticalIssueResponse(BaseModel):
     issue_id: int
     file_name: str
     file_author: str
+    file_author_name: str
     severity: int
     issue_line_numbers: str
     type: str
@@ -94,7 +96,9 @@ class ReportOverviewResponse(BaseModel):
     project_id: str
     review_version: str
     copy_from_version: str
-    view_mode: Literal["latest", "trigger"]
+    view_mode: Literal["latest", "trigger", "snapshot"]
+    snapshot_id: str
+    snapshot_url: str
     trigger_revision: int | None
     trigger_count: int
     removed_file_names: list[str]
@@ -161,6 +165,7 @@ class TaskReportResponse(BaseModel):
     progress: ReportProgressResponse
     metrics: ReportMetricsResponse
     authors: list[str]
+    author_name_map: dict[str, str]
     selected_author: str
     highest_severity: int | None
     critical_issues: list[CriticalIssueResponse]

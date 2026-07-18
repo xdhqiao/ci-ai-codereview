@@ -14,6 +14,8 @@ pipeline {
         string(name: 'COPY_FROM_VERSION', defaultValue: '0_version', description: 'Base version; 0_version means full scan')
         string(name: 'REVIEW_VERSION_PATH', defaultValue: '', description: 'Review directory visible to the review server')
         string(name: 'COPY_FROM_VERSION_PATH', defaultValue: '', description: 'Base directory visible to the review server; required for incremental scan')
+        choice(name: 'TASK_TYPE', choices: ['3', '1', '2'], description: '1=development increment, 2=production increment, 3=full scan')
+        string(name: 'AUTHOR_MAP_FILE', defaultValue: '', description: 'JSON author map file visible to the review server')
     }
 
     stages {
@@ -34,6 +36,10 @@ pipeline {
                     : "${REVIEW_VERSION_PATH:?REVIEW_VERSION_PATH is required}"
                     if [ "$COPY_FROM_VERSION" != "0_version" ]; then
                         : "${COPY_FROM_VERSION_PATH:?COPY_FROM_VERSION_PATH is required for incremental review}"
+                        case "$TASK_TYPE" in 1|2) ;; *) echo "Incremental review TASK_TYPE must be 1 or 2" >&2; exit 2 ;; esac
+                    elif [ "$TASK_TYPE" != "3" ]; then
+                        echo "Full scan TASK_TYPE must be 3" >&2
+                        exit 2
                     fi
                     python3 --version
                 '''
@@ -54,6 +60,8 @@ pipeline {
                                 --copy-from-version "$COPY_FROM_VERSION" \
                                 --review-version-path "$REVIEW_VERSION_PATH" \
                                 --copy-from-version-path "$COPY_FROM_VERSION_PATH" \
+                                --task-type "$TASK_TYPE" \
+                                --author-map-file "$AUTHOR_MAP_FILE" \
                                 --submitter "jenkins:${JOB_NAME}:${BUILD_NUMBER}" \
                                 --timeout 900
                         '''

@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     mock_parent_path: str = ""
     mock_copy_from_version: str = ""
     mock_review_version: str = "/app"
-    mock_task_type: int = 2
+    mock_task_type: int = 3
 
     model_config = SettingsConfigDict(
         env_file=".env",

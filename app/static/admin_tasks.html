@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>代码审核任务管理</title>
-  <link rel="stylesheet" href="/static/admin_tasks.css?v=20260716-admin1">
+  <link rel="stylesheet" href="/static/admin_tasks.css?v=20260718-admin2">
 </head>
 <body>
   <header class="topbar">
@@ -13,7 +13,10 @@
         <p class="eyebrow">CODE REVIEW ADMIN</p>
         <h1>审核任务管理</h1>
       </div>
-      <span id="result-summary" class="result-summary">正在加载...</span>
+      <div class="topbar-actions">
+        <a class="admin-link" href="/admin/feedback.html">反馈管理</a>
+        <span id="result-summary" class="result-summary">正在加载...</span>
+      </div>
     </div>
   </header>
 
@@ -43,8 +46,9 @@
           <span>任务种类</span>
           <select id="type-filter" name="task_type">
             <option value="">全部种类</option>
-            <option value="1">增量审核</option>
-            <option value="2">全量审核</option>
+            <option value="1">轮询版</option>
+            <option value="2">正式版</option>
+            <option value="3">全量审核</option>
           </select>
         </label>
         <label>
@@ -103,7 +107,6 @@
     </section>
   </main>
 
-  <script src="/static/admin_tasks.js?v=20260716-admin1" defer></script>
+  <script src="/static/admin_tasks.js?v=20260718-task-type2" defer></script>
 </body>
 </html>
-

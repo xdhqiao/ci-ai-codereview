@@ -18,10 +18,13 @@ def test_review_trigger_pipeline_preserves_client_contract():
         "COPY_FROM_VERSION": "--copy-from-version",
         "REVIEW_VERSION_PATH": "--review-version-path",
         "COPY_FROM_VERSION_PATH": "--copy-from-version-path",
+        "AUTHOR_MAP_FILE": "--author-map-file",
     }
     for parameter, option in expected_parameters.items():
         assert f"string(name: '{parameter}'" in pipeline
         assert option in pipeline
+    assert "choice(name: 'TASK_TYPE'" in pipeline
+    assert "--task-type" in pipeline
     assert "scripts/jenkins_trigger.py" in pipeline
 
 

@@ -1,7 +1,9 @@
 from datetime import datetime
+from urllib.parse import quote
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from app.common.constant import FULL_SCAN_BASE_VERSION, TaskType
 from app.models.task import TaskModel
 from app.schemas.code_file import ModelRoundTraceResponse
 
@@ -12,11 +14,20 @@ class TaskCreate(BaseModel):
     copy_from_version: str = ""
     review_version_path: str = ""
     copy_from_version_path: str = ""
-    task_type: int = Field(default=2, description="1 means incremental scan, 2 means full scan")
+    task_type: int = Field(default=TaskType.FULL_SCAN.value, description="1 dev, 2 prd, 3 full scan")
+    author_map_file: str = ""
     state: int = 0
     submitter: str | None = None
     parent_path: str | None = None
     created_by: str = ""
+
+    @model_validator(mode="after")
+    def validate_task_type(self) -> "TaskCreate":
+        if self.copy_from_version.strip() in {"", "0", FULL_SCAN_BASE_VERSION}:
+            self.task_type = TaskType.FULL_SCAN.value
+        elif self.task_type not in TaskType.incremental_values():
+            raise ValueError("incremental review requires task_type 1 (dev_version) or 2 (prd_version)")
+        return self
 
 
 class TaskResponse(BaseModel):
@@ -26,6 +37,7 @@ class TaskResponse(BaseModel):
     copy_from_version: str
     review_version_path: str
     copy_from_version_path: str
+    author_map_file: str
     task_type: int | None
     state: int
     submitter: str | None
@@ -67,6 +79,8 @@ class TaskResponse(BaseModel):
     developer_issue_summary: dict
     trigger_count: int
     trigger_revision: int
+    latest_snapshot_id: str
+    latest_snapshot_url: str
     lease_owner: str
     lease_expires_at: datetime | None
     heartbeat_time: datetime | None
@@ -79,6 +93,17 @@ class TaskResponse(BaseModel):
 
     @classmethod
     def from_model(cls, task: TaskModel) -> "TaskResponse":
+        latest_snapshot_id = task.latest_snapshot_id or ""
+        latest_snapshot_url = ""
+        if latest_snapshot_id:
+            comparison = (
+                f"{quote(task.review_version, safe='')}_vs_"
+                f"{quote(task.copy_from_version, safe='')}"
+            )
+            latest_snapshot_url = (
+                f"/snapshot/{quote(latest_snapshot_id, safe='')}/"
+                f"{quote(task.project_id, safe='')}/{comparison}.html"
+            )
         return cls(
             id=str(task.id),
             project_id=task.project_id,
@@ -86,6 +111,7 @@ class TaskResponse(BaseModel):
             copy_from_version=task.copy_from_version,
             review_version_path=task.review_version_path or "",
             copy_from_version_path=task.copy_from_version_path or "",
+            author_map_file=task.author_map_file or "",
             task_type=task.task_type,
             state=task.state,
             submitter=task.submitter,
@@ -127,6 +153,8 @@ class TaskResponse(BaseModel):
             developer_issue_summary=task.developer_issue_summary or {},
             trigger_count=task.trigger_count or 0,
             trigger_revision=task.trigger_revision or 0,
+            latest_snapshot_id=latest_snapshot_id,
+            latest_snapshot_url=latest_snapshot_url,
             lease_owner=task.lease_owner or "",
             lease_expires_at=task.lease_expires_at,
             heartbeat_time=task.heartbeat_time,
@@ -147,8 +175,18 @@ class TaskListResponse(BaseModel):
 class JenkinsTaskTrigger(BaseModel):
     project_id: str
     review_version: str
-    copy_from_version: str = "0_version"
+    copy_from_version: str = FULL_SCAN_BASE_VERSION
     review_version_path: str
     copy_from_version_path: str = ""
+    task_type: int | None = None
+    author_map_file: str = ""
     submitter: str | None = None
     created_by: str = "jenkins"
+
+    @model_validator(mode="after")
+    def validate_task_type(self) -> "JenkinsTaskTrigger":
+        if self.copy_from_version.strip() == FULL_SCAN_BASE_VERSION:
+            self.task_type = TaskType.FULL_SCAN.value
+        elif self.task_type not in TaskType.incremental_values():
+            raise ValueError("incremental review requires task_type 1 (dev_version) or 2 (prd_version)")
+        return self

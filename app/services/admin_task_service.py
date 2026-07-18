@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import quote
 
+from app.common.constant import SEVERE_ISSUE_SEVERITY
 from app.core.exceptions import AppError
 from app.models.code_file import CodeFileModel
 from app.models.task import TaskModel
@@ -202,7 +203,7 @@ class AdminTaskService:
         return TaskIssueStats(
             issue_count=issue_count,
             highest_severity=highest_severity,
-            critical_issue_count=counts[highest_severity],
+            critical_issue_count=counts.get(SEVERE_ISSUE_SEVERITY, 0),
         )
 
     def _derived_sort_value(
@@ -242,4 +243,3 @@ class AdminTaskService:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
-

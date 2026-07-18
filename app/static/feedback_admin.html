@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>审核反馈管理</title>
+  <link rel="stylesheet" href="/static/feedback_admin.css?v=20260718-feedback2">
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div>
+        <p class="eyebrow">CODE REVIEW FEEDBACK</p>
+        <h1>审核反馈管理</h1>
+      </div>
+      <nav class="topnav"><a href="/admin/tasks.html">任务管理</a></nav>
+    </div>
+  </header>
+  <main class="shell">
+    <section class="filter-band" aria-labelledby="filter-title">
+      <h2 id="filter-title">统计范围</h2>
+      <form id="filter-form">
+        <label><span>开始日期</span><input id="start-date" name="start_date" type="date"></label>
+        <label><span>结束日期</span><input id="end-date" name="end_date" type="date"></label>
+        <label><span>展示方式</span>
+          <select id="view-filter" name="view">
+            <option value="prd_version">正式版</option>
+            <option value="full_scan">全量审核</option>
+            <option value="author_prd">维护人（正式版）</option>
+            <option value="author_full">维护人（全量审核）</option>
+          </select>
+        </label>
+        <div class="filter-actions">
+          <button class="button-primary" type="submit">查询</button>
+          <button class="button-secondary" id="reset-filter" type="button">重置</button>
+        </div>
+      </form>
+    </section>
+
+    <section aria-labelledby="summary-title">
+      <div class="section-heading"><h2 id="summary-title">反馈汇总</h2><span id="scope-label" class="muted"></span></div>
+      <div id="summary-grid" class="summary-grid"></div>
+      <div class="chart-grid">
+        <article class="chart-panel">
+          <div><h3>已反馈严重问题</h3><p class="muted">severity=5 的赞成与反对</p></div>
+          <canvas id="feedback-pie" width="320" height="230" aria-label="严重问题反馈饼图"></canvas>
+          <div id="feedback-legend" class="legend"></div>
+        </article>
+        <article class="chart-panel">
+          <div><h3>问题严重度分布</h3><p class="muted">全部有效问题</p></div>
+          <canvas id="severity-pie" width="320" height="230" aria-label="问题严重度分布饼图"></canvas>
+          <div id="severity-legend" class="legend"></div>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="list-title">
+      <div class="section-heading"><div><h2 id="list-title">反馈列表</h2><p id="list-range" class="muted"></p></div></div>
+      <div class="table-scroll"><table><thead><tr id="list-head"></tr></thead><tbody id="list-body"></tbody></table></div>
+      <p id="empty-state" class="empty" hidden>当前范围没有数据。</p>
+      <div id="error-state" class="error-state" hidden><strong>反馈数据加载失败</strong><p id="error-message"></p><button id="retry-load" class="button-secondary" type="button">重新加载</button></div>
+      <nav id="pagination" class="pagination" aria-label="反馈列表分页" hidden></nav>
+    </section>
+  </main>
+  <div id="loading" class="loading">正在统计反馈数据...</div>
+  <script src="/static/feedback_admin.js?v=20260718-feedback2" defer></script>
+</body>
+</html>

@@ -44,13 +44,18 @@ def _code_file(task: TaskModel, issues: list[Issue]) -> CodeFileModel:
     ).save()
 
 
-def test_admin_page_and_assets_are_local_and_report_links_back_to_admin(client):
+def test_admin_page_owns_management_navigation_and_report_has_no_admin_links(client):
     page = client.get("/admin/tasks.html")
 
     assert page.status_code == 200
     assert page.headers["cache-control"] == "no-store"
     assert "审核任务管理" in page.text
     assert 'id="filter-form"' in page.text
+    assert 'class="admin-link" href="/admin/feedback.html">反馈管理</a>' in page.text
+    assert '<option value="1">轮询版</option>' in page.text
+    assert '<option value="2">正式版</option>' in page.text
+    assert '<option value="3">全量审核</option>' in page.text
+    assert '开发版' not in page.text
     assert page.text.count('class="sort-button') == 9
     assert "https://" not in page.text
     assert "http://" not in page.text
@@ -59,6 +64,10 @@ def test_admin_page_and_assets_are_local_and_report_links_back_to_admin(client):
         assert asset.status_code == 200
         assert "https://" not in asset.text
         assert "http://" not in asset.text
+    admin_script = client.get("/static/admin_tasks.js").text
+    assert "1: ['轮询版', 'incremental']" in admin_script
+    assert "2: ['正式版', 'incremental']" in admin_script
+    assert "3: ['全量审核', 'full']" in admin_script
 
     report_task = _task(
         project_id="demo",
@@ -67,7 +76,8 @@ def test_admin_page_and_assets_are_local_and_report_links_back_to_admin(client):
     )
     report = client.get(f"/{report_task.project_id}/{report_task.review_version}_vs_master.html")
     assert report.status_code == 200
-    assert 'href="/admin/tasks.html"' in report.text
+    assert 'href="/admin/tasks.html"' not in report.text
+    assert 'href="/admin/feedback.html"' not in report.text
 
 
 def test_admin_api_filters_and_counts_reportable_issues(client):
@@ -84,7 +94,7 @@ def test_admin_api_filters_and_counts_reportable_issues(client):
         project_id="beta-service",
         review_version="release",
         copy_from_version="0_version",
-        task_type=2,
+        task_type=3,
         state=0,
         score=0,
         create_time=datetime(2026, 7, 12, 8, tzinfo=timezone.utc),
@@ -115,7 +125,7 @@ def test_admin_api_filters_and_counts_reportable_issues(client):
     assert by_id[str(first.id)]["critical_issue_count"] == 2
     assert by_id[str(second.id)]["issue_count"] == 2
     assert by_id[str(second.id)]["highest_severity"] == 4
-    assert by_id[str(second.id)]["critical_issue_count"] == 1
+    assert by_id[str(second.id)]["critical_issue_count"] == 0
     assert by_id[str(second.id)]["report_url"] == "/beta-service/release_vs_0_version.html"
     assert client.get(by_id[str(second.id)]["report_url"]).status_code == 200
 
@@ -123,7 +133,7 @@ def test_admin_api_filters_and_counts_reportable_issues(client):
     assert {item["task_id"] for item in project["items"]} == {str(first.id), str(third.id)}
     version = client.get("/api/admin/tasks", params={"review_version": "ONE"}).json()
     assert [item["task_id"] for item in version["items"]] == [str(first.id)]
-    task_type = client.get("/api/admin/tasks", params={"task_type": 2}).json()
+    task_type = client.get("/api/admin/tasks", params={"task_type": 3}).json()
     assert [item["task_id"] for item in task_type["items"]] == [str(second.id)]
     state = client.get("/api/admin/tasks", params={"state": 1}).json()
     assert [item["task_id"] for item in state["items"]] == [str(third.id)]
@@ -146,7 +156,7 @@ def test_admin_api_filters_and_counts_reportable_issues(client):
         ("state", "charlie"),
         ("task_type", "alpha"),
         ("score", "charlie"),
-        ("critical_issue_count", "charlie"),
+        ("critical_issue_count", "alpha"),
         ("issue_count", "charlie"),
         ("create_time", "charlie"),
     ],
@@ -233,4 +243,4 @@ def test_admin_api_rejects_invalid_filters(client):
     assert invalid_range.status_code == 422
     assert invalid_range.json()["error"]["code"] == "invalid_date_range"
     assert client.get("/api/admin/tasks", params={"sort_by": "unknown"}).status_code == 422
-    assert client.get("/api/admin/tasks", params={"task_type": 3}).status_code == 422
+    assert client.get("/api/admin/tasks", params={"task_type": 4}).status_code == 422

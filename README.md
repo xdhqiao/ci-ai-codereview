@@ -38,8 +38,8 @@ pytest
 ## 主要接口
 
 - `GET /health`：健康检查，同时 ping MongoDB。
-- `POST /tasks`：创建审核任务。`task_type=1` 表示本地两个目录的增量扫描，`task_type=2` 表示全量扫描。
-- `POST /tasks/trigger`：Jenkins/client 触发入口。校验代码目录、创建或重置 Task，并在返回前把所有待审文件和 Block 预写入 MongoDB。
+- `POST /tasks`：创建审核任务。`task_type=1/2/3` 分别表示开发版增量、正式版增量、全量扫描；`copy_from_version=0_version` 时强制为 `3`。
+- `POST /tasks/trigger`：Jenkins/client 触发入口。增量任务必须传 `task_type=1` 或 `2`，可传 `author_map_file` JSON 路径；接口校验代码目录、创建或重置 Task，并在返回前把所有待审文件和 Block 预写入 MongoDB。
 - `GET /tasks`、`GET /tasks/{task_id}`、`DELETE /tasks/{task_id}`：任务 CRUD。
 - `POST /tasks/mock`：按环境变量创建一个 mock 任务。
 - `POST /tasks/{task_id}/review`：执行审核流程。任务开始时 `state=1`，所有文件审核完成后 `state=2`；存在预算跳过或 main_task 未闭环的文件时为 `state=3`、`completion_status=partial`。
@@ -47,9 +47,13 @@ pytest
 - `GET /code-files`、`GET /code-files/{code_file_id}`：查询落库后的文件审核结果。
 - `GET /admin/tasks.html`：后台任务管理页面，支持项目/版本/日期/种类/状态筛选、全列排序和每页 20 条分页。
 - `GET /api/admin/tasks`：后台任务列表数据接口，支持 `project_id`、`review_version`、`date_from`、`date_to`、`task_type`、`state`、`sort_by`、`sort_order`、`page`、`page_size`。
+- `GET /admin/feedback.html`、`GET /api/admin/feedback`：正式版/全量审核及维护人维度的反馈汇总，严重问题固定指 `severity=5`。
+- `GET /author/{author_name}/issue_report.html`、`GET /api/authors/{author_name}/issue-report`：维护人问题与反馈明细。
 - `GET /{project_id}/{review_version}_vs_{copy_from_version}.html`：打开一个任务的增量或全量审核报告页面。
-- `GET /api/reports/tasks/{task_id}`：获取报告聚合数据；支持 `author`、`page`、`page_size`、`trigger_revision`，默认及最大每页 300 个文件。
-- `GET /api/reports/{project_id}/{review_version}_vs_{copy_from_version}.html`：按项目和版本组合获取同一份报告数据；传 `trigger_revision` 时只展示该轮发生变化的文件。
+- `GET /api/reports/tasks/{task_id}`：获取主任务最新报告；支持 `author`、`page`、`page_size`、`trigger_revision`，默认及最大每页 300 个文件。传 `trigger_revision` 时解析到对应的不可变变更快照。
+- `GET /api/reports/{project_id}/{review_version}_vs_{copy_from_version}.html`：按项目和版本组合获取主任务最新报告。
+- `GET /snapshot/{snapshot_id}/{project_id}/{review_version}_vs_{copy_from_version}.html`：打开某次后续代码变更的不可变快照报告。
+- `GET /api/reports/snapshot/{snapshot_id}/{project_id}/{review_version}_vs_{copy_from_version}.html`：获取快照报告数据，只统计该次真正变化的文件和 Block。
 - `POST /api/feedback/{file_id}/{block_id}/{issue_id}`：保存 issue 反馈。赞成传 `feedback_type=agree`；反对传 `feedback_type=reject` 和非空 `feedback_content`。
 
 ## Client 与 Server
@@ -63,22 +67,26 @@ python scripts/jenkins_trigger.py \
   --review-version feature \
   --copy-from-version master \
   --review-version-path /repositories/demo_c/feature \
-  --copy-from-version-path /repositories/demo_c/master
+  --copy-from-version-path /repositories/demo_c/master \
+  --task-type 2 \
+  --author-map-file /repositories/demo_c/author_map.json
 ```
 
 Jenkins 参数中的路径必须是 server 进程可见的路径。Compose 默认把宿主 `CODE_REPOSITORY_HOST_ROOT=./demo_repos` 只读映射到容器 `CODE_REPOSITORY_CONTAINER_ROOT=/repositories`；Jenkins 应传容器路径。Jenkins 与 server 不在同一机器时，应把仓库放到双方约定的共享存储，或先同步到 server 的挂载目录。
 
 三个 Jenkins Job 的创建、凭据、GitLab Registry、不可变制品、生产审批和蓝绿部署操作见 [Jenkins 与 GitLab 部署说明](docs/jenkins-deployment.md)。
 
-触发阶段按全局 `REVIEW_EXCLUDE_PATHS`、目录排除规则和 `ProjectModel.exclude_path` 过滤文件，被排除文件不会创建 `CodeFileModel`。相同 `project_id + review_version + copy_from_version` 重复触发时复用同一 Task，物理目录更新为本轮 Jenkins workspace，累计 token、LLM 调用次数和耗时；MD5 未变化的已完成 Block 原样保留，变化的 Block 清空审核结果并回到待审状态。每轮新增、变化、复用和移除的文件名保存在 `ai_codereview_task_trigger`。
+触发阶段按全局 `REVIEW_EXCLUDE_PATHS`、目录排除规则和 `ProjectModel.exclude_path` 过滤文件，被排除文件不会创建 `CodeFileModel`。相同 `project_id + review_version + copy_from_version` 重复触发时复用同一 Task，物理目录更新为本轮 Jenkins workspace，累计 token、LLM 调用次数和耗时。系统逐 Block 比较 `block_hash`：未变化 Block 原样保留评分、Issue 和调用轨迹；变化 Block 清空成功或失败的旧审核记录并回到待审状态，其他未完成或失败 Block 也会继续处理。
+
+首次触发不创建快照。后续触发存在真实 Block 变化或文件删除时，会创建一条 `ai_codereview_task_snapshot`；存在当前代码的变化 Block 另存到 `ai_codereview_code_file_snapshot`，删除文件记录在 `removed_file_names`。快照代码和审核结果独立复制，不会被以后再次提交覆盖；同一份代码重复触发不会生成空快照。若新代码在上一快照完成前再次到达，旧快照标记为 `superseded` 并冻结，最新快照承接审核。
 
 server 默认每 5 秒扫描一次。人工失败项续审优先级最高，其次是增量任务，再次是全量任务；同优先级按 `create_time` FIFO。高优先级任务到达后，低优先级任务会协作式中断，并在下一次领取时从已落库的未完成 Block 继续。`state=0/1/2/3/4` 分别表示待审、审核中、完成、部分完成或失败、触发准备中。租约和心跳用于服务重启及多实例恢复，过期租约会被重新领取。自动重试采用指数退避；人工续审通过独立调度字段排队，不靠清空审核结果。每个 Block 完成后立即落库，不需要等待整个项目完成；任务完成后调用当前仅记录 demo 日志的邮件通知函数。
 
 ## 审核报告
 
-任务创建后即可访问 `http://localhost:8000/{project_id}/{review_version}_vs_{copy_from_version}.html`，该固定链接始终展示当前 review 目录相对基线的全部最新结果。追加 `?trigger_revision=N` 可只展示第 N 次触发涉及的文件；文件内容、评分和 Issue 仍从最新 `CodeFileModel` 读取，不回放过时审核结果。报告每 5 秒静默刷新待审、审核中和续审任务，展示文件/Block 进度、失败数、五维雷达图、token 与工具调用统计、当前负责人范围内最高 severity 问题，以及分页文件/Block/Issue 详情。审核进度严格按“成功完成的 Block 数 / 总 Block 数”计算，失败 Block 不计入已审核。只有进度不足 100%、不存在待审或审核中 Block、且至少存在一个失败 Block 时，“重新审核失败项”按钮才可点击；审核仍在进行或已经 100% 完成时按钮禁用。增量报告的代码区直接读取 `CodeBlock.contents` 中的 diff 与上下文；全量报告读取同一字段中的完整代码，代码框支持横向和纵向滚动。Issue 行号直接读取 `Issue.issue_line_numbers`。
+任务创建后即可访问 `http://localhost:8000/{project_id}/{review_version}_vs_{copy_from_version}.html`，该固定链接始终展示当前 review 目录相对基线的全部最新结果。后续变化完成后，可访问 `/snapshot/{snapshot_id}/{project_id}/{review_version}_vs_{copy_from_version}.html` 查看只包含该次变化 Block 的不可变报告；也可以在主报告 API 追加 `?trigger_revision=N` 解析同一快照。报告每 5 秒静默刷新待审、审核中和续审任务，展示文件/Block 进度、失败数、五维雷达图、token 与工具调用统计、`severity=5` 的严重问题，以及分页文件/Block/Issue 详情。审核进度严格按“成功完成的 Block 数 / 总 Block 数”计算，失败 Block 不计入已审核。只有进度不足 100%、不存在待审或审核中 Block、且至少存在一个失败 Block 时，“重新审核失败项”按钮才可点击；审核仍在进行或已经 100% 完成时按钮禁用。增量报告的代码区直接读取 `CodeBlock.contents` 中的 diff 与上下文；全量报告读取同一字段中的完整代码，代码框支持横向和纵向滚动。Issue 行号直接读取 `Issue.issue_line_numbers`。
 
-任务和文件五维分数按 Block 变更行数加权平均，增量扫描的权重为 Block 中 `+`、`-` 行数，全量扫描为 Block 全部代码行数；总分是五维分数的平均数。`file_author` 只作为已有数据的只读筛选条件，全部为空时页面不显示负责人菜单。`issue_show` 和 `file_author` 均不会由当前审核流程自动处理或写入。
+任务和文件五维分数按 Block 变更行数加权平均，增量扫描的权重为 Block 中 `+`、`-` 行数，全量扫描为 Block 全部代码行数；总分是五维分数的平均数。Client 可通过 `author_map_file` 提交 `{文件路径: 账号}` JSON，账号写入 `CodeFileModel.file_author`，页面通过 `get_user_account_name_map()` 显示中文姓名；全部为空时不显示负责人菜单。`issue_show` 是备用字段，当前流程不读取也不修改。
 
 ## 增量扫描说明
 

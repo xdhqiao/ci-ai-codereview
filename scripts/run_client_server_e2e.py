@@ -304,12 +304,14 @@ def trigger_payload(
     review_path: str,
     copy_path: str = "",
 ) -> dict[str, Any]:
+    task_type = 3 if copy_from_version == "0_version" else 1
     return {
         "project_id": project_id,
         "review_version": review_version,
         "copy_from_version": copy_from_version,
         "review_version_path": review_path,
         "copy_from_version_path": copy_path,
+        "task_type": task_type,
         "submitter": "client-server-e2e",
         "created_by": "jenkins-e2e",
     }
@@ -460,7 +462,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     full_initial = client.trigger(full_payload)
     full_id = full_initial["id"]
     full_prewrite = client.code_files(full_id)
-    assert_true(full_initial["task_type"] == 2, "Full submission has the wrong task_type")
+    assert_true(full_initial["task_type"] == 3, "Full submission has the wrong task_type")
     assert_true(len(full_prewrite) == 10, f"Full client submission persisted {len(full_prewrite)} files, expected 10")
     assert_true(all(item["state"] == 0 for item in full_prewrite), "Full files were not all pending after submission")
 

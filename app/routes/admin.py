@@ -24,7 +24,7 @@ def list_admin_tasks(
     review_version: str = Query(default="", max_length=200),
     date_from: datetime | None = None,
     date_to: datetime | None = None,
-    task_type: int | None = Query(default=None, ge=1, le=2),
+    task_type: int | None = Query(default=None, ge=1, le=3),
     state: int | None = Query(default=None, ge=0, le=4),
     sort_by: AdminTaskSortField = "create_time",
     sort_order: SortOrder = "desc",

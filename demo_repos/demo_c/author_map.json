@@ -1,0 +1,10 @@
+{
+  "src/auth.c": "dahai",
+  "src/buffer.c": "xiaoming",
+  "src/config.c": "xiaoming",
+  "src/logging.c": "dahai",
+  "src/net_client.c": "xiaoming",
+  "src/parser.c": "dahai",
+  "src/report.c": "xiaoming",
+  "src/storage.c": "dahai"
+}

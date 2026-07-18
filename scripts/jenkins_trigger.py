@@ -13,6 +13,8 @@ def main() -> None:
     parser.add_argument("--copy-from-version", default="0_version")
     parser.add_argument("--review-version-path", required=True)
     parser.add_argument("--copy-from-version-path", default="")
+    parser.add_argument("--task-type", type=int, choices=(1, 2, 3))
+    parser.add_argument("--author-map-file", default="")
     parser.add_argument("--submitter", default="jenkins")
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args()
@@ -23,6 +25,8 @@ def main() -> None:
         "copy_from_version": args.copy_from_version,
         "review_version_path": args.review_version_path,
         "copy_from_version_path": args.copy_from_version_path,
+        "task_type": args.task_type,
+        "author_map_file": args.author_map_file,
         "submitter": args.submitter,
         "created_by": "jenkins",
     }

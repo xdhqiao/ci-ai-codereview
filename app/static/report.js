@@ -73,7 +73,7 @@ function renderReport(report) {
   renderProgress(report.progress, report.overview);
   renderScores(report.overview);
   renderMetrics(report.metrics);
-  renderAuthors(report.authors, report.selected_author);
+  renderAuthors(report.authors, report.selected_author, report.author_name_map || {});
   renderCriticalIssues(report.critical_issues, report.highest_severity);
   renderFiles(report.files, report.pagination);
   renderPagination($('#pagination-top'), report.pagination);
@@ -90,7 +90,9 @@ function scheduleRefresh(report) {
 }
 
 function renderOverview(overview, progress) {
-  $('#project-title').textContent = `${overview.project_id} 审核报告`;
+  $('#project-title').textContent = overview.view_mode === 'snapshot'
+    ? `${overview.project_id} 变更快照报告`
+    : `${overview.project_id} 审核报告`;
   const status = $('#task-state');
   const statusNames = {
     pending: '等待审核', running: '审核中', completed: '审核完成', partial: '部分失败', failed: '审核失败',
@@ -109,8 +111,17 @@ function renderOverview(overview, progress) {
     ['审核时间', dateTime(overview.create_time)],
     ['审核时长', duration(overview.process_time_ms)],
   ];
-  if (overview.view_mode === 'trigger') {
-    values.splice(3, 0, ['提交轮次', `第 ${overview.trigger_revision} 次（当前最新第 ${overview.trigger_count} 次）`]);
+  if (overview.view_mode === 'snapshot') {
+    values.splice(
+      3,
+      0,
+      ['快照 ID', overview.snapshot_id],
+      ['提交轮次', `第 ${overview.trigger_revision} 次（当前最新第 ${overview.trigger_count} 次）`],
+    );
+    const removedFiles = overview.removed_file_names || [];
+    if (removedFiles.length) {
+      values.push(['删除文件', removedFiles.join('、')]);
+    }
   }
   $('#overview-grid').replaceChildren(...values.map(([term, value]) => {
     const dl = document.createElement('dl');
@@ -257,7 +268,7 @@ function renderMetrics(metrics) {
   }));
 }
 
-function renderAuthors(authors, selected) {
+function renderAuthors(authors, selected, authorNameMap) {
   const control = $('#author-control');
   control.hidden = authors.length === 0;
   if (!authors.length) return;
@@ -265,7 +276,10 @@ function renderAuthors(authors, selected) {
   select.replaceChildren();
   const all = new Option('全部负责人', '');
   select.add(all);
-  authors.forEach((author) => select.add(new Option(author, author)));
+  authors.forEach((author) => {
+    const option = new Option(authorNameMap[author] || '未配置姓名', author);
+    select.add(option);
+  });
   select.value = selected;
 }
 
@@ -303,7 +317,7 @@ function renderFile(file) {
   title.append(heading);
   title.append(reviewStatus(file.status));
   if (file.file_author) {
-    const author = document.createElement('span'); author.className = 'file-author'; author.textContent = `负责人：${file.file_author}`; title.append(author);
+    const author = document.createElement('span'); author.className = 'file-author'; author.textContent = `负责人：${file.file_author_name || '未配置姓名'}`; title.append(author);
   }
   const dimensions = document.createElement('span');
   dimensions.className = 'file-dimensions';

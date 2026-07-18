@@ -10,10 +10,6 @@ from app.services.exclusions import ReviewPathExcluder
 from app.services.language import detect_language
 
 
-TASK_TYPE_INCREMENTAL = 1
-TASK_TYPE_FULL_SCAN = 2
-
-
 @dataclass(frozen=True)
 class ReviewTarget:
     file_name: str

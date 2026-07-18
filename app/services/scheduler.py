@@ -9,9 +9,9 @@ from threading import Event
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from mongoengine.queryset.visitor import Q
 
+from app.common.constant import TaskType, is_incremental_task_type
 from app.core.config import Settings, get_settings
 from app.models.task import TaskModel
-from app.services.diff_service import TASK_TYPE_FULL_SCAN, TASK_TYPE_INCREMENTAL
 from app.services.review_service import ReviewTaskService
 
 
@@ -146,11 +146,7 @@ class ReviewScheduler:
 
     def claim_next_task(self) -> TaskModel | None:
         now = utc_now()
-        candidates = TaskModel.objects(task_type__in=[TASK_TYPE_INCREMENTAL, TASK_TYPE_FULL_SCAN]).order_by(
-            "-dispatch_priority",
-            "task_type",
-            "create_time",
-        )
+        candidates = self._ordered_candidates()
         for candidate in candidates:
             if not self._eligible(candidate, now):
                 continue
@@ -240,11 +236,7 @@ class ReviewScheduler:
 
     def _has_higher_priority_task(self) -> bool:
         now = utc_now()
-        candidates = TaskModel.objects(task_type__in=[TASK_TYPE_INCREMENTAL, TASK_TYPE_FULL_SCAN]).order_by(
-            "-dispatch_priority",
-            "task_type",
-            "create_time",
-        )
+        candidates = self._ordered_candidates()
         for task in candidates:
             if not self._eligible(task, now):
                 continue
@@ -253,8 +245,8 @@ class ReviewScheduler:
                 return True
             if (
                 candidate_priority == self._active_dispatch_priority
-                and self._active_task_type == TASK_TYPE_FULL_SCAN
-                and task.task_type == TASK_TYPE_INCREMENTAL
+                and self._active_task_type == TaskType.FULL_SCAN.value
+                and is_incremental_task_type(task.task_type)
             ):
                 return True
         return False
@@ -264,8 +256,25 @@ class ReviewScheduler:
         now = utc_now()
         return any(
             self._eligible(task, now)
-            for task in TaskModel.objects(task_type=TASK_TYPE_INCREMENTAL).order_by("create_time")
+            for task in TaskModel.objects(task_type__in=TaskType.incremental_values()).order_by("create_time")
         )
+
+    @staticmethod
+    def _ordered_candidates() -> list[TaskModel]:
+        candidates = list(
+            TaskModel.objects(task_type__in=[member.value for member in TaskType]).order_by(
+                "-dispatch_priority",
+                "create_time",
+            )
+        )
+        candidates.sort(
+            key=lambda task: (
+                -int(task.dispatch_priority or 0),
+                1 if task.task_type == TaskType.FULL_SCAN.value else 0,
+                task.create_time,
+            )
+        )
+        return candidates
 
     def _clear_active(self) -> None:
         self._active_future = None

@@ -283,7 +283,7 @@ def test_full_scan_reviews_all_lines(tmp_path: Path):
         project_id="scan-project",
         review_version=str(target_dir),
         copy_from_version="",
-        task_type=2,
+        task_type=3,
         state=0,
     ).save()
 
@@ -338,11 +338,11 @@ def test_zero_version_means_full_scan_under_repository_root(tmp_path: Path):
 
     reviewed_task = ReviewTaskService(settings).review_task(task)
 
-    assert reviewed_task.task_type == 2
+    assert reviewed_task.task_type == 3
     assert reviewed_task.state == 2
     code_file = CodeFileModel.objects(task_id=str(task.id)).first()
     assert code_file.file_name == "main.c"
-    assert code_file.task_type == 2
+    assert code_file.task_type == 3
     assert code_file.add_code_line_num == 3
 
 
@@ -832,7 +832,7 @@ def test_full_scan_batches_are_grouped_by_language():
         project_id="batch-language",
         review_version="head",
         copy_from_version="0_version",
-        task_type=2,
+        task_type=3,
         state=0,
     )
     targets = [
@@ -904,7 +904,7 @@ def test_finish_task_does_not_overwrite_a_newer_trigger_revision(monkeypatch):
         project_id="finish-race-project",
         review_version="master",
         copy_from_version="0_version",
-        task_type=2,
+        task_type=3,
         state=1,
         trigger_revision=1,
         lease_owner="worker",
@@ -1328,7 +1328,7 @@ def test_semantic_batch_dedup_is_strict_and_persists_task_trace():
         project_id="semantic-dedup",
         review_version="head",
         copy_from_version="0_version",
-        task_type=2,
+        task_type=3,
         state=1,
     ).save()
 
@@ -1349,7 +1349,7 @@ def test_semantic_batch_dedup_is_strict_and_persists_task_trace():
             project_id=task.project_id,
             review_version=task.review_version,
             copy_from_version=task.copy_from_version,
-            task_type=2,
+            task_type=3,
             file_name=path,
             code_blocks=[CodeBlock(block_id=1, contents=["     1+  strcpy(dst, src);"], issues=[issue])],
             comment_line_number=1,
@@ -1452,7 +1452,7 @@ def test_full_scan_llm_project_summary_and_task_usage_are_persisted():
         project_id="summary-project",
         review_version="head",
         copy_from_version="0_version",
-        task_type=2,
+        task_type=3,
         state=1,
     ).save()
     code_files: list[CodeFileModel] = []
@@ -1473,7 +1473,7 @@ def test_full_scan_llm_project_summary_and_task_usage_are_persisted():
                 project_id=task.project_id,
                 review_version=task.review_version,
                 copy_from_version=task.copy_from_version,
-                task_type=2,
+                    task_type=3,
                 file_name=path,
                 code_blocks=[
                     CodeBlock(

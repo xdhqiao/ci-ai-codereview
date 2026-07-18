@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,19 +12,15 @@ from pathlib import Path
 from threading import Event, Lock
 from typing import Any
 
+from app.common.constant import FULL_SCAN_BASE_VERSION, TaskState, TaskType, is_incremental_task_type
 from app.core.config import Settings, get_settings
 from app.core.exceptions import NotFoundError, ReviewInterruptedError
 from app.models.code_file import CodeBlock, CodeFileModel, Issue, ModelRoundTrace, ToolCallTrace
 from app.models.task import TaskModel
+from app.models.task_snapshot import TaskSnapshotModel
 from app.services.background import FileBackgroundProvider, FileReviewBackground, MockFileBackgroundProvider
 from app.services.comment_filter import comment_only_block_flags
-from app.services.diff_service import (
-    TASK_TYPE_FULL_SCAN,
-    TASK_TYPE_INCREMENTAL,
-    CodeDiffService,
-    ReviewCollection,
-    ReviewTarget,
-)
+from app.services.diff_service import CodeDiffService, ReviewCollection, ReviewTarget
 from app.services.evidence import CodeEvidenceLocator, EvidenceMatch
 from app.services.exclusions import project_exclude_paths
 from app.services.llm_client import LLMClient
@@ -45,12 +42,14 @@ from app.services.semantic_index import SemanticIndex
 from app.services.static_analysis import SarifFindingLoader, StaticFinding
 from app.services.task_retry import automatic_retry_time
 from app.services.task_submission import TaskFileSynchronizer, code_block_hash, review_target_hash
+from app.services.task_snapshot import TaskSnapshotService
 
 
 SCORE_FIELDS = ["logic_score", "performance_score", "security_score", "readable_score", "code_style_score"]
-TASK_STATE_COMPLETED = 2
-TASK_STATE_PARTIAL = 3
+TASK_STATE_COMPLETED = TaskState.COMPLETED.value
+TASK_STATE_PARTIAL = TaskState.PARTIAL.value
 REVIEW_PIPELINE_VERSION = "2026-07-15-ocr-accuracy-v6-comment-filter"
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -107,6 +106,7 @@ class ReviewTaskService:
         self.settings = settings or get_settings()
         self.diff_service = CodeDiffService(self.settings)
         self.llm_client = LLMClient(self.settings)
+        self.snapshot_service = TaskSnapshotService()
         self.review_context = ReviewCollection(targets=[], diff_map={}, changed_files=[])
         self.evidence_locator = CodeEvidenceLocator(self.settings.review_line_evidence_min_similarity)
         self.related_file_resolver = RelatedFileResolver()
@@ -213,6 +213,8 @@ class ReviewTaskService:
 
             self._check_interrupted()
             self._finish_task(task, saved_files, started_at)
+            snapshot = self.snapshot_service.checkpoint(task, finalize=True)
+            self._log_review_completion(task, snapshot)
             if task.state == TASK_STATE_COMPLETED and not task.completion_email_sent:
                 ReviewNotificationService().send_review_completed(task)
                 updated = TaskModel.objects(
@@ -259,6 +261,7 @@ class ReviewTaskService:
             task.heartbeat_time = None
             task.update_time = utc_now()
             task.save()
+            self.snapshot_service.checkpoint(task)
             raise
 
     def _collect_targets(self, task: TaskModel) -> tuple[ReviewCollection, Path]:
@@ -266,7 +269,7 @@ class ReviewTaskService:
         task.task_type = task_type
         task.save()
 
-        if task_type == TASK_TYPE_INCREMENTAL:
+        if is_incremental_task_type(task_type):
             if task.copy_from_version_path and task.review_version_path:
                 base_dir, head_dir = Path(task.copy_from_version_path), Path(task.review_version_path)
             else:
@@ -286,12 +289,12 @@ class ReviewTaskService:
         return self.diff_service.scan_directory_with_context(target_dir), target_dir
 
     def _resolve_task_type(self, task: TaskModel) -> int:
-        if task.task_type in {TASK_TYPE_INCREMENTAL, TASK_TYPE_FULL_SCAN}:
-            return int(task.task_type)
         copy_from_version = (task.copy_from_version or "").strip()
-        if copy_from_version in {"", "0", "0_version"}:
-            return TASK_TYPE_FULL_SCAN
-        return TASK_TYPE_INCREMENTAL
+        if copy_from_version in {"", "0", FULL_SCAN_BASE_VERSION}:
+            return TaskType.FULL_SCAN.value
+        if is_incremental_task_type(task.task_type):
+            return int(task.task_type)
+        return TaskType.DEV_VERSION.value
 
     @staticmethod
     def _retry_failed_file_names(task: TaskModel) -> set[str]:
@@ -347,7 +350,7 @@ class ReviewTaskService:
         if not targets:
             return []
         strategy = self.settings.scan_batch_strategy.strip().lower()
-        if task.task_type != TASK_TYPE_FULL_SCAN or strategy not in {"by-language", "by-directory"}:
+        if task.task_type != TaskType.FULL_SCAN.value or strategy not in {"by-language", "by-directory"}:
             return [targets[start : start + batch_size] for start in range(0, len(targets), batch_size)]
 
         buckets: dict[str, list[ReviewTarget]] = {}
@@ -421,7 +424,7 @@ class ReviewTaskService:
         }
 
     def _effective_token_budget(self, task: TaskModel) -> int:
-        if task.task_type != TASK_TYPE_FULL_SCAN:
+        if task.task_type != TaskType.FULL_SCAN.value:
             return 0
         return max(0, self.settings.full_scan_token_budget)
 
@@ -494,7 +497,7 @@ class ReviewTaskService:
         code_files: list[CodeFileModel],
         batch_index: int,
     ) -> None:
-        if task.task_type != TASK_TYPE_FULL_SCAN or not self.settings.full_scan_batch_dedup_enabled:
+        if task.task_type != TaskType.FULL_SCAN.value or not self.settings.full_scan_batch_dedup_enabled:
             return
 
         seen: dict[tuple[str, int, str, str], tuple[CodeFileModel, CodeBlock, Issue]] = {}
@@ -562,7 +565,7 @@ class ReviewTaskService:
         batch_index: int,
     ) -> int:
         if (
-            task.task_type != TASK_TYPE_FULL_SCAN
+            task.task_type != TaskType.FULL_SCAN.value
             or len(code_files) < 2
             or self.llm_client.is_mock
             or not self.settings.full_scan_batch_dedup_llm_enabled
@@ -798,6 +801,9 @@ class ReviewTaskService:
             set__tool_call_summary=usage["tool_calls"],
             set__update_time=utc_now(),
         )
+        current = TaskModel.objects(id=task.id).first()
+        if current is not None:
+            self.snapshot_service.checkpoint(current)
 
     def _checkpoint_task_progress(self, task: TaskModel) -> None:
         code_files = list(CodeFileModel.objects(task_id=str(task.id)).only("state", "code_blocks", "extra"))
@@ -861,6 +867,34 @@ class ReviewTaskService:
             set__state=0,
             set__update_time=utc_now(),
         )
+        self.snapshot_service.checkpoint(current)
+
+    def _log_review_completion(
+        self,
+        task: TaskModel,
+        snapshot: TaskSnapshotModel | None,
+    ) -> None:
+        if snapshot is not None and snapshot.state == TASK_STATE_COMPLETED:
+            updated = TaskSnapshotModel.objects(
+                id=snapshot.id,
+                completion_log_sent=False,
+            ).update_one(
+                set__completion_log_sent=True,
+                set__update_time=utc_now(),
+            )
+            if updated:
+                logger.info(
+                    "变更文件审核完成 %s",
+                    self.snapshot_service.report_path(snapshot),
+                )
+            return
+        if (
+            snapshot is None
+            and task.state == TASK_STATE_COMPLETED
+            and (task.trigger_count or 1) <= 1
+            and not task.completion_email_sent
+        ):
+            logger.info("首次审核结束")
 
     def _target_hash(
         self,
@@ -2480,7 +2514,7 @@ class ReviewTaskService:
         project_summary: dict[str, Any],
     ) -> str:
         if (
-            task.task_type != TASK_TYPE_FULL_SCAN
+            task.task_type != TaskType.FULL_SCAN.value
             or self.llm_client.is_mock
             or not self.settings.full_scan_project_summary_enabled
             or not self.settings.full_scan_project_summary_llm_enabled

@@ -9,25 +9,15 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class TaskModel(Document):
-    meta = {
-        "collection": "ai_codereview_task",
-        "indexes": [
-            ("project_id", "review_version", "copy_from_version"),
-            ("task_type", "state", "create_time"),
-            ("state", "-create_time"),
-            ("task_type", "-create_time"),
-            "-create_time",
-            ("-dispatch_priority", "task_type", "state", "create_time"),
-            {"fields": ["submission_key"], "unique": True, "sparse": True},
-        ],
-    }
+class TaskBaseModel(Document):
+    meta = {"abstract": True}
 
     project_id = StringField(required=True)
     review_version = StringField(required=True)
     copy_from_version = StringField(required=True)
     review_version_path = StringField(required=False, default="")
     copy_from_version_path = StringField(required=False, default="")
+    author_map_file = StringField(required=False, default="")
     submission_key = StringField(required=False)
     task_type = IntField(required=False)
     state = IntField(required=True)
@@ -81,3 +71,20 @@ class TaskModel(Document):
     create_time = DateTimeField(default=utc_now, required=True)
     updated_by = StringField(required=False, default="")
     update_time = DateTimeField(required=False)
+
+
+class TaskModel(TaskBaseModel):
+    meta = {
+        "collection": "ai_codereview_task",
+        "indexes": [
+            ("project_id", "review_version", "copy_from_version"),
+            ("task_type", "state", "create_time"),
+            ("state", "-create_time"),
+            ("task_type", "-create_time"),
+            "-create_time",
+            ("-dispatch_priority", "task_type", "state", "create_time"),
+            {"fields": ["submission_key"], "unique": True, "sparse": True},
+        ],
+    }
+
+    latest_snapshot_id = StringField(required=False, default="")

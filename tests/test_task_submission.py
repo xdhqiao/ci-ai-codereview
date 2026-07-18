@@ -5,10 +5,12 @@ import pytest
 
 from app.core.config import Settings
 from app.models.code_file import CodeFileModel, Issue, ModelRoundTrace, ToolCallTrace
+from app.models.code_file_snapshot import CodeFileSnapshotModel
 from app.models.project import ProjectModel
 from app.models.task import TaskModel
-from app.models.task_trigger import TaskTriggerModel
+from app.models.task_snapshot import TaskSnapshotModel
 from app.services.review_service import ReviewTaskService
+from app.services.task_snapshot import TaskSnapshotService
 from app.services.task_submission import TaskSubmissionService
 
 
@@ -42,7 +44,7 @@ def test_full_trigger_creates_project_and_only_persists_reviewable_files(tmp_pat
         review_version_path=str(review_root),
     )
 
-    assert task.task_type == 2
+    assert task.task_type == 3
     assert task.state == 0
     assert task.completion_status == "pending"
     project = ProjectModel.objects(project_id="demo-c").first()
@@ -103,6 +105,11 @@ def test_duplicate_trigger_reuses_unchanged_block_and_resets_changed_block(tmp_p
     assert unchanged.code_blocks[0].comment == "reviewed comment"
     assert unchanged.code_blocks[0].main_task_completed is True
 
+    unchanged.code_blocks[0].failure_message = "old model failure"
+    unchanged.code_blocks[0].main_task_completed = False
+    unchanged.code_blocks[0].review_state = 3
+    unchanged.state = 3
+    unchanged.save()
     _write(review_root, "src/app.c", "int app(void) { return 1; }\n")
     third = service.trigger(**trigger)
     changed = CodeFileModel.objects(task_id=str(first.id)).first()
@@ -120,7 +127,103 @@ def test_duplicate_trigger_reuses_unchanged_block_and_resets_changed_block(tmp_p
     assert changed.code_blocks[0].block_hash != original_hash
     assert changed.code_blocks[0].comment == ""
     assert changed.code_blocks[0].issues == []
+    assert changed.code_blocks[0].failure_message == ""
+    assert changed.code_blocks[0].review_attempt_count == 0
     assert changed.code_blocks[0].main_task_completed is False
+    snapshot = TaskSnapshotModel.objects(task_id=str(first.id), trigger_revision=3).first()
+    assert snapshot is not None
+    assert snapshot.changed_files == [str(changed.id)]
+    assert snapshot.changed_file_names == ["src/app.c"]
+    assert snapshot.code_block_num == 1
+    assert third.latest_snapshot_id == snapshot.snapshot_id
+
+    fourth = service.trigger(**trigger)
+    carried = TaskSnapshotModel.objects(id=snapshot.id).first()
+    assert fourth.id == first.id
+    assert fourth.trigger_revision == 4
+    assert carried.snapshot_id == snapshot.snapshot_id
+    assert carried.trigger_revision == 4
+    assert carried.completion_status == "pending"
+    assert TaskSnapshotModel.objects(task_id=str(first.id)).count() == 1
+    superseded_file = CodeFileSnapshotModel.objects(snapshot_id=carried.snapshot_id).first()
+    superseded_contents = deepcopy(superseded_file.code_blocks[0].contents)
+
+    _write(review_root, "src/app.c", "int app(void) { return 2; }\n")
+    fifth = service.trigger(**trigger)
+    carried.reload()
+    replacement = TaskSnapshotModel.objects(task_id=str(first.id), trigger_revision=5).first()
+    assert fifth.id == first.id
+    assert TaskModel.objects(
+        project_id="demo-c",
+        review_version="master",
+        copy_from_version="0_version",
+    ).count() == 1
+    assert carried.state == 3
+    assert carried.completion_status == "superseded"
+    assert replacement is not None
+    assert replacement.snapshot_id != carried.snapshot_id
+    TaskSnapshotService().checkpoint(fourth)
+    carried.reload()
+    superseded_file.reload()
+    assert carried.completion_status == "superseded"
+    assert superseded_file.code_blocks[0].contents == superseded_contents
+
+
+def test_removed_file_creates_snapshot_and_recalculates_task_without_reviewing_unchanged_blocks(tmp_path, caplog):
+    caplog.set_level("INFO")
+    review_root = tmp_path / "master"
+    _write(review_root, "src/keep.c", "int keep(void) { return 1; }\n")
+    _write(review_root, "src/removed.c", "int removed(void) { return 2; }\n")
+    keep_path = review_root / "src/keep.c"
+    removed_path = review_root / "src/removed.c"
+    settings = Settings(
+        review_exclude_paths="",
+        llm_mock_enabled=True,
+        review_semantic_index_enabled=False,
+        full_scan_batch_dedup_enabled=False,
+        full_scan_project_summary_enabled=False,
+    )
+    submission = TaskSubmissionService(settings)
+    trigger = {
+        "project_id": "removed-file-snapshot-project",
+        "review_version": "master",
+        "copy_from_version": "0_version",
+        "review_version_path": str(review_root),
+    }
+    first = ReviewTaskService(settings).review_task(submission.trigger(**trigger))
+    assert first.state == 2
+    assert keep_path.exists()
+    first_process_time = first.process_time
+
+    caplog.clear()
+    removed_path.unlink()
+    pending = submission.trigger(**trigger)
+    snapshot = TaskSnapshotModel.objects(task_id=str(first.id), trigger_revision=2).first()
+
+    assert pending.id == first.id
+    assert pending.state == 0
+    assert pending.file_num == 1
+    assert pending.reviewed_file_num == 1
+    assert snapshot is not None
+    assert snapshot.changed_files == []
+    assert snapshot.changed_file_names == []
+    assert snapshot.removed_file_names == ["src/removed.c"]
+    assert CodeFileSnapshotModel.objects(snapshot_id=snapshot.snapshot_id).count() == 0
+
+    completed = ReviewTaskService(settings).review_task(pending)
+    snapshot.reload()
+
+    assert completed.state == 2
+    assert completed.file_num == 1
+    assert completed.reviewed_file_num == 1
+    assert completed.process_time >= first_process_time
+    assert CodeFileModel.objects(task_id=str(first.id), file_name="src/removed.c").count() == 0
+    assert snapshot.state == 2
+    assert snapshot.completion_status == "completed"
+    assert snapshot.file_num == 0
+    assert snapshot.code_block_num == 0
+    assert snapshot.completion_log_sent is True
+    assert "变更文件审核完成" in caplog.text
 
 
 def test_same_comparison_reuses_task_when_jenkins_workspace_path_changes(tmp_path):
@@ -170,8 +273,9 @@ def test_same_comparison_reuses_task_when_jenkins_workspace_path_changes(tmp_pat
     latest_file = CodeFileModel.objects(task_id=str(first.id)).first()
     assert latest_file.code_blocks[0].comment == ""
     assert latest_file.code_blocks[0].main_task_completed is False
-    snapshot = TaskTriggerModel.objects(task_id=str(first.id), trigger_revision=2).first()
-    assert snapshot.report_file_names == ["src/app.c"]
+    snapshot = TaskSnapshotModel.objects(task_id=str(first.id), trigger_revision=2).first()
+    assert snapshot.changed_file_names == ["src/app.c"]
+    assert snapshot.changed_files == [str(latest_file.id)]
 
 
 @pytest.mark.parametrize(
@@ -539,10 +643,7 @@ def test_incremental_retrigger_only_resets_the_file_whose_diff_changed(tmp_path)
         "copy_from_version_path": str(base_root),
     }
     task = service.trigger(**trigger)
-    first_trigger = TaskTriggerModel.objects(task_id=str(task.id), trigger_revision=1).first()
-    assert first_trigger is not None
-    assert first_trigger.report_file_names == ["src/auth.c", "src/cache.c"]
-    assert first_trigger.added_file_names == ["src/auth.c", "src/cache.c"]
+    assert TaskSnapshotModel.objects(task_id=str(task.id)).count() == 0
     original_files = {
         item.file_name: item for item in CodeFileModel.objects(task_id=str(task.id))
     }
@@ -597,16 +698,18 @@ def test_incremental_retrigger_only_resets_the_file_whose_diff_changed(tmp_path)
     assert synchronized["src/auth.c"].code_blocks[0].llm_total_tokens == 0
     assert synchronized["src/auth.c"].code_blocks[0].main_task_completed is False
     assert synchronized["src/auth.c"].code_blocks[0].review_fingerprint == ""
-    second_trigger = TaskTriggerModel.objects(task_id=str(task.id), trigger_revision=2).first()
+    second_trigger = TaskSnapshotModel.objects(task_id=str(task.id), trigger_revision=2).first()
     assert second_trigger is not None
-    assert second_trigger.report_file_names == ["src/auth.c"]
-    assert second_trigger.added_file_names == []
     assert second_trigger.changed_file_names == ["src/auth.c"]
-    assert second_trigger.reused_file_names == ["src/cache.c"]
+    assert second_trigger.changed_files == [str(synchronized["src/auth.c"].id)]
     assert second_trigger.removed_file_names == []
+    assert [(item["file_name"], item["block_id"]) for item in second_trigger.changed_blocks] == [
+        ("src/auth.c", 0)
+    ]
 
 
-def test_full_client_server_resume_reviews_only_the_changed_block(tmp_path):
+def test_full_client_server_resume_reviews_only_the_changed_block(tmp_path, caplog):
+    caplog.set_level("INFO")
     review_root = tmp_path / "master"
     _write(
         review_root,
@@ -632,6 +735,7 @@ def test_full_client_server_resume_reviews_only_the_changed_block(tmp_path):
     first = submission.trigger(**trigger)
     first = ReviewTaskService(settings).review_task(first)
     assert first.state == 2
+    assert "首次审核结束" in caplog.text
     first_file = CodeFileModel.objects(task_id=str(first.id)).first()
     assert len(first_file.code_blocks) == 3
     assert all(block.main_task_completed for block in first_file.code_blocks)
@@ -659,7 +763,17 @@ def test_full_client_server_resume_reviews_only_the_changed_block(tmp_path):
     assert pending_file.code_blocks[2].to_mongo().to_dict() == unchanged_b_before
     assert pending_file.code_blocks[1].block_hash != changed_hash_before
     assert pending_file.code_blocks[1].review_attempt_count == 0
+    snapshot = TaskSnapshotModel.objects(task_id=str(first.id), trigger_revision=2).first()
+    assert snapshot is not None
+    assert pending.latest_snapshot_id == snapshot.snapshot_id
+    assert snapshot.changed_files == [str(pending_file.id)]
+    assert snapshot.changed_file_names == ["src/resume.c"]
+    snapshot_file = CodeFileSnapshotModel.objects(snapshot_id=snapshot.snapshot_id).first()
+    assert snapshot_file is not None
+    assert len(snapshot_file.code_blocks) == 1
+    assert snapshot_file.code_blocks[0].block_hash == pending_file.code_blocks[1].block_hash
 
+    caplog.clear()
     completed = ReviewTaskService(settings).review_task(pending)
     completed_file = CodeFileModel.objects(task_id=str(first.id)).first()
 
@@ -672,6 +786,16 @@ def test_full_client_server_resume_reviews_only_the_changed_block(tmp_path):
     assert completed_file.code_blocks[2].to_mongo().to_dict() == unchanged_b_before
     assert completed_file.code_blocks[1].main_task_completed is True
     assert completed_file.code_blocks[1].review_attempt_count == 1
+    snapshot.reload()
+    snapshot_file.reload()
+    assert snapshot.state == 2
+    assert snapshot.completion_status == "completed"
+    assert snapshot.file_num == 1
+    assert snapshot.code_block_num == 1
+    assert snapshot.llm_total_tokens == snapshot_file.code_blocks[0].llm_total_tokens
+    assert snapshot.completion_log_sent is True
+    assert "变更文件审核完成" in caplog.text
+    assert TaskSnapshotService.report_path(snapshot) in caplog.text
 
 
 def test_trigger_route_prepares_task_and_files(client, tmp_path):
@@ -691,7 +815,61 @@ def test_trigger_route_prepares_task_and_files(client, tmp_path):
     assert response.status_code == 201
     body = response.json()
     assert body["state"] == 0
-    assert body["task_type"] == 2
+    assert body["task_type"] == 3
     assert body["file_num"] == 1
     assert TaskModel.objects(id=body["id"]).count() == 1
     assert CodeFileModel.objects(task_id=body["id"]).count() == 1
+
+
+def test_incremental_trigger_requires_type_and_applies_author_map(client, tmp_path):
+    base_root = tmp_path / "master"
+    review_root = tmp_path / "feature"
+    _write(base_root, "src/auth.c", "int auth(void) { return 0; }\n")
+    _write(review_root, "src/auth.c", "int auth(void) { return 1; }\n")
+    _write(review_root, "src/config.c", "int config(void) { return 1; }\n")
+    author_map = tmp_path / "authors.json"
+    author_map.write_text(
+        '{"src/auth.c":"dahai","src\\\\config.c":"xiaoming"}',
+        encoding="utf-8",
+    )
+    payload = {
+        "project_id": "demo-author",
+        "review_version": "feature",
+        "copy_from_version": "master",
+        "review_version_path": str(review_root),
+        "copy_from_version_path": str(base_root),
+        "author_map_file": str(author_map),
+    }
+
+    missing_type = client.post("/tasks/trigger", json=payload)
+    assert missing_type.status_code == 422
+
+    response = client.post("/tasks/trigger", json={**payload, "task_type": 2})
+    assert response.status_code == 201
+    body = response.json()
+    assert body["task_type"] == 2
+    assert body["author_map_file"] == str(author_map.resolve())
+    authors = {
+        item.file_name: item.file_author
+        for item in CodeFileModel.objects(task_id=body["id"])
+    }
+    assert authors == {"src/auth.c": "dahai", "src/config.c": "xiaoming"}
+
+
+def test_full_scan_forces_type_three_even_when_caller_sends_incremental_type(client, tmp_path):
+    review_root = tmp_path / "master"
+    _write(review_root, "src/app.c", "int app(void) { return 0; }\n")
+
+    response = client.post(
+        "/tasks/trigger",
+        json={
+            "project_id": "demo-full-type",
+            "review_version": "master",
+            "copy_from_version": "0_version",
+            "review_version_path": str(review_root),
+            "task_type": 2,
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["task_type"] == 3

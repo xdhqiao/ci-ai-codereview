@@ -1,6 +1,7 @@
 from app.models.code_file import CodeBlock, CodeFileModel, Issue, ModelRoundTrace, ToolCallTrace
+from app.models.code_file_snapshot import CodeFileSnapshotModel
 from app.models.task import TaskModel
-from app.models.task_trigger import TaskTriggerModel
+from app.services.task_snapshot import TaskSnapshotService
 
 
 def _score_block(block_id: int, score: int, contents: list[str], issues: list[Issue]) -> CodeBlock:
@@ -137,8 +138,26 @@ def test_task_report_author_filter_controls_issues_files_and_pagination(client):
     assert body["selected_author"] == "bob"
     assert body["pagination"] == {"page": 1, "page_size": 1, "total_items": 1, "total_pages": 1}
     assert [item["file_name"] for item in body["files"]] == ["src/math.c"]
-    assert body["highest_severity"] == 3
-    assert [item["file_author"] for item in body["critical_issues"]] == ["bob"]
+    assert body["highest_severity"] is None
+    assert body["critical_issues"] == []
+
+
+def test_task_report_displays_known_author_name_without_exposing_account(client):
+    task, code_file, _ = _create_report_data()
+    code_file.file_author = "dahai"
+    code_file.save()
+
+    response = client.get(f"/api/reports/tasks/{task.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    dahai_file = next(item for item in body["files"] if item["file_author"] == "dahai")
+    assert body["author_name_map"]["dahai"] == "大海"
+    assert dahai_file["file_author_name"] == "大海"
+    script = client.get("/static/report.js").text
+    assert "author.title = file.file_author" not in script
+    assert "option.title = author" not in script
+    assert "file.file_author_name || file.file_author" not in script
 
 
 def test_feedback_api_updates_embedded_issue_by_zero_based_ids(client):
@@ -189,58 +208,97 @@ def test_report_page_and_page_size_limit(client):
     assert client.get(f"/api/reports/tasks/{task.id}", params={"page_size": 301}).status_code == 422
 
 
-def test_trigger_report_filters_file_selection_but_reads_latest_code_file(client):
+def test_snapshot_report_only_contains_changed_blocks_and_remains_immutable(client):
     task, auth_file, _ = _create_report_data()
     task.trigger_count = 2
     task.trigger_revision = 2
     task.save()
-    TaskTriggerModel(
-        task_id=str(task.id),
-        project_id=task.project_id,
-        review_version=task.review_version,
-        copy_from_version=task.copy_from_version,
-        trigger_revision=1,
-        report_file_names=["src/auth.c"],
+    auth_file.code_blocks[0].contents = ["    77+  int snapshot_revision = 1;"]
+    auth_file.code_blocks[0].comment = "snapshot review"
+    auth_file.save()
+    snapshot = TaskSnapshotService().create(
+        task,
         changed_file_names=["src/auth.c"],
-    ).save()
-    TaskTriggerModel(
-        task_id=str(task.id),
-        project_id=task.project_id,
-        review_version=task.review_version,
-        copy_from_version=task.copy_from_version,
-        trigger_revision=2,
-        report_file_names=[],
-        reused_file_names=["src/auth.c", "src/math.c"],
-    ).save()
+        changed_block_refs={"src/auth.c": [{"block_id": 0, "block_hash": ""}]},
+        removed_file_names=[],
+    )
+    assert snapshot is not None
 
-    auth_file.code_blocks[0].contents = ["    77+  int latest_revision = 1;"]
-    auth_file.code_blocks[0].comment = "latest review only"
+    auth_file.code_blocks[0].contents = ["    88+  int later_revision = 2;"]
+    auth_file.code_blocks[0].comment = "later main-task review"
     auth_file.save()
 
     response = client.get(
         "/api/reports/demo-c/feature_vs_master.html",
-        params={"trigger_revision": 1},
+        params={"trigger_revision": 2},
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["overview"]["view_mode"] == "trigger"
-    assert body["overview"]["trigger_revision"] == 1
+    assert body["overview"]["view_mode"] == "snapshot"
+    assert body["overview"]["snapshot_id"] == snapshot.snapshot_id
+    assert body["overview"]["snapshot_url"] == TaskSnapshotService.report_path(snapshot)
+    assert body["overview"]["trigger_revision"] == 2
     assert body["overview"]["trigger_count"] == 2
     assert body["pagination"]["total_items"] == 1
     assert [item["file_name"] for item in body["files"]] == ["src/auth.c"]
-    assert body["files"][0]["blocks"][0]["contents"] == ["    77+  int latest_revision = 1;"]
-    assert body["files"][0]["blocks"][0]["comment"] == "latest review only"
-    no_change = client.get(
-        f"/api/reports/tasks/{task.id}",
-        params={"trigger_revision": 2},
-    ).json()
-    assert no_change["pagination"]["total_items"] == 0
-    assert no_change["progress"]["percentage"] == 100
+    assert body["metrics"]["file_num"] == 1
+    assert body["metrics"]["code_block_num"] == 1
+    assert len(body["files"][0]["blocks"]) == 1
+    assert body["files"][0]["overall_score"] == 50
+    assert body["files"][0]["blocks"][0]["contents"] == ["    77+  int snapshot_revision = 1;"]
+    assert body["files"][0]["blocks"][0]["comment"] == "snapshot review"
+    snapshot_file_id = body["files"][0]["file_id"]
+    feedback = client.post(
+        f"/api/feedback/{snapshot_file_id}/0/0",
+        json={"feedback_type": "agree"},
+    )
+    assert feedback.status_code == 200
+    persisted_snapshot_file = CodeFileSnapshotModel.objects(id=snapshot_file_id).first()
+    assert persisted_snapshot_file.code_blocks[0].issues[0].feedback_type == "agree"
+    auth_file.reload()
+    assert (auth_file.code_blocks[0].issues[0].feedback_type or "") == ""
+    snapshot_page = client.get(TaskSnapshotService.report_path(snapshot))
+    assert snapshot_page.status_code == 200
+    snapshot_api = client.get(f"/api/reports{TaskSnapshotService.report_path(snapshot)}")
+    assert snapshot_api.status_code == 200
+    canonical = client.get(f"/api/reports/tasks/{task.id}").json()
+    assert canonical["files"][0]["blocks"][0]["contents"] == ["    88+  int later_revision = 2;"]
     assert client.get(
         f"/api/reports/tasks/{task.id}",
         params={"trigger_revision": 99},
     ).status_code == 404
+
+
+def test_removed_only_snapshot_report_is_complete_and_contains_no_current_files(client):
+    task, _, _ = _create_report_data()
+    task.trigger_count = 2
+    task.trigger_revision = 2
+    task.state = 0
+    task.save()
+    service = TaskSnapshotService()
+    snapshot = service.create(
+        task,
+        changed_file_names=[],
+        changed_block_refs={},
+        removed_file_names=["src/removed.c"],
+    )
+    assert snapshot is not None
+
+    task.state = 2
+    task.save()
+    snapshot = service.checkpoint(task, snapshot=snapshot, finalize=True)
+    response = client.get(f"/api/reports{service.report_path(snapshot)}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["overview"]["removed_file_names"] == ["src/removed.c"]
+    assert body["overview"]["state"] == 2
+    assert body["progress"]["percentage"] == 100
+    assert body["progress"]["total_file_num"] == 0
+    assert body["progress"]["total_block_num"] == 0
+    assert body["pagination"]["total_items"] == 0
+    assert body["files"] == []
 
 
 def test_report_frontend_has_no_external_css_or_javascript(client):
@@ -272,6 +330,7 @@ def test_report_frontend_contains_live_progress_retry_and_scrollable_code_ui(cli
     assert "max-height: 520px" in css
     assert "/retry-failures" in javascript
     assert "auto_refresh_seconds" in javascript
+    assert "删除文件" in javascript
 
 
 def test_progress_uses_completed_blocks_and_only_enables_retry_when_failures_are_all_that_remain(client):
