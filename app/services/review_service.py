@@ -216,7 +216,13 @@ class ReviewTaskService:
             snapshot = self.snapshot_service.checkpoint(task, finalize=True)
             self._log_review_completion(task, snapshot)
             if task.state == TASK_STATE_COMPLETED and not task.completion_email_sent:
-                ReviewNotificationService().send_review_completed(task)
+                try:
+                    notification_completed = ReviewNotificationService(settings=self.settings).send_review_completed(task)
+                except Exception:
+                    notification_completed = False
+                    logger.exception("Review completion email failed: task_id=%s", task.id)
+                if not notification_completed:
+                    return task
                 updated = TaskModel.objects(
                     id=task.id,
                     trigger_revision=self.active_trigger_revision,

@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     app_enable_scheduler: bool = False
+    email_sender: str = "ci-ai-codereview@example.com"
+    email_admin_receivers: str = "admin@example.com"
+    email_account_domain: str = "example.com"
+    email_report_base_url: str = "http://127.0.0.1:8000"
     scheduler_interval_seconds: int = 5
     scheduler_lease_seconds: int = 120
     scheduler_max_task_retries: int = 3
@@ -24,8 +28,12 @@ class Settings(BaseSettings):
 
     llm_url: str = ""
     llm_api_key: str = ""
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "deepseek-v4-flash"
+    llm_fallback_model: str = "deepseek-v4-flash"
     llm_timeout_seconds: int = 120
+    llm_api_retry_times: int = 2
+    llm_retry_backoff_seconds: float = 1.0
+    llm_retry_backoff_max_seconds: float = 8.0
     llm_concurrency: int = 4
     llm_max_tool_rounds: int = 30
     full_scan_max_tool_rounds: int = 60
@@ -117,6 +125,10 @@ class Settings(BaseSettings):
     @property
     def allowed_extension_set(self) -> set[str]:
         return {item.strip().lower() for item in self.review_allowed_extensions.split(",") if item.strip()}
+
+    @property
+    def email_admin_receiver_list(self) -> list[str]:
+        return list(dict.fromkeys(item.strip() for item in self.email_admin_receivers.split(",") if item.strip()))
 
 
 @lru_cache

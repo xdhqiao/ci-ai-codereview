@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>代码审核完成</title>
+</head>
+<body style="margin:0;background:#f5f7fa;color:#1f2937;font-family:Arial,'Microsoft YaHei',sans-serif;">
+  <div style="max-width:960px;margin:0 auto;padding:24px;">
+    <div style="background:#ffffff;border:1px solid #d9e0e8;border-radius:8px;padding:24px;">
+      <h1 style="margin:0 0 18px;font-size:24px;">代码审核完成</h1>
+      <p style="margin:0 0 16px;line-height:1.8;">
+        项目：<strong>$project_id</strong>，版本：<strong>$review_version</strong>，对比版本：<strong>$copy_from_version</strong>
+      </p>
+
+      <div style="margin-bottom:22px;padding:12px;background:#f3f6f9;border-left:4px solid #2563eb;line-height:1.8;">
+        总分：<strong>$score</strong>　逻辑：$logic_score　性能：$performance_score　安全：$security_score　可读性：$readable_score　代码风格：$code_style_score
+      </div>
+
+      <h2 style="margin:0 0 10px;font-size:18px;">问题统计</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px;">
+        <thead>
+          <tr style="background:#eef2f7;">
+            <th style="padding:9px;border:1px solid #d9e0e8;text-align:left;">负责人</th>
+            <th style="padding:9px;border:1px solid #d9e0e8;text-align:right;">严重问题个数</th>
+            <th style="padding:9px;border:1px solid #d9e0e8;text-align:right;">其它问题个数</th>
+          </tr>
+        </thead>
+        <tbody>$owner_rows</tbody>
+      </table>
+
+      <h2 style="margin:0 0 10px;font-size:18px;">严重问题列表</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px;">
+        <thead>
+          <tr style="background:#fee2e2;">
+            <th style="padding:9px;border:1px solid #d9e0e8;">NO</th>
+            <th style="padding:9px;border:1px solid #d9e0e8;text-align:left;">文件名</th>
+            <th style="padding:9px;border:1px solid #d9e0e8;text-align:left;">行号</th>
+            <th style="padding:9px;border:1px solid #d9e0e8;text-align:left;">类型</th>
+            <th style="padding:9px;border:1px solid #d9e0e8;text-align:left;">问题描述</th>
+            <th style="padding:9px;border:1px solid #d9e0e8;text-align:left;">修复建议</th>
+          </tr>
+        </thead>
+        <tbody>$severe_issue_rows</tbody>
+      </table>
+
+      <p style="margin:0;">审核报告：<a href="$report_url">$report_path</a></p>
+    </div>
+  </div>
+</body>
+</html>

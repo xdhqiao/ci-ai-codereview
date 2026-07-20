@@ -13,6 +13,10 @@
 | `APP_HOST` | `0.0.0.0` | 监听地址。Dockerfile 当前直接使用 `0.0.0.0`，容器内只修改该值不会改变 uvicorn 参数。 |
 | `APP_PORT` | `8000` | 应用端口。Dockerfile 和 Compose 当前固定为 8000。 |
 | `APP_ENABLE_SCHEDULER` | `false`（Compose 默认 `true`） | 是否启用 server 端 `AsyncIOScheduler`。生产审核 server 应开启；仅 API/client 节点应关闭。 |
+| `EMAIL_SENDER` | `ci-ai-codereview@example.com` | 固定发件人。`EmailServer.send()` 不接收发件人参数，由服务配置统一控制。 |
+| `EMAIL_ADMIN_RECEIVERS` | `admin@example.com` | 管理员收件人，逗号分隔；任务完成时所有管理员合并为一封邮件发送。 |
+| `EMAIL_ACCOUNT_DOMAIN` | `example.com` | 负责人账号转邮箱时使用的域名，例如账号 `dahai` 转为 `dahai@example.com`。空负责人不会发送个人邮件。 |
+| `EMAIL_REPORT_BASE_URL` | `http://127.0.0.1:8000` | 邮件中审核报告链接的服务根地址。生产环境必须改为用户可访问的内网 URL。 |
 | `SCHEDULER_INTERVAL_SECONDS` | `5` | 待审任务扫描与运行中任务心跳间隔。建议 3～10 秒。 |
 | `SCHEDULER_LEASE_SECONDS` | `120` | worker 任务租约时长。应明显大于扫描间隔；建议为扫描间隔的 10 倍以上。服务异常退出后，其他实例会在租约过期后恢复任务。 |
 | `SCHEDULER_MAX_TASK_RETRIES` | `3` | partial/failed 任务自动重试上限。持续失败达到上限后保留状态与诊断数据，等待人工处理或再次触发。 |
@@ -36,14 +40,24 @@
 |---|---:|---|
 | `LLM_URL` | 空 | OpenAI-compatible 服务地址；代码会自动补 `/chat/completions`。为空时自动进入 mock。 |
 | `LLM_API_KEY` | 空 | Bearer API Key。只通过进程环境变量或密钥服务注入。 |
-| `LLM_MODEL` | `gpt-4o-mini` | 模型名称，必须与服务端实际支持名称一致。 |
+| `LLM_MODEL` | `deepseek-v4-flash` | 首次 API 请求使用的主模型。 |
+| `LLM_FALLBACK_MODEL` | `deepseek-v4-flash` | 首次请求发生可恢复故障后，两次重试使用的兜底模型；可与主模型相同。 |
 | `LLM_MOCK_ENABLED` | `true` | 启用本地确定性 mock。真实审核必须设为 `false`，并同时设置 `LLM_URL`。 |
 | `LLM_TIMEOUT_SECONDS` | `120` | 单次 LLM API 超时。普通模型建议 120～180，慢推理模型建议 300。 |
+| `LLM_API_RETRY_TIMES` | `2` | 单次 API 请求失败后的额外重试次数。默认最多调用 3 次：主模型 1 次、兜底模型 2 次。 |
+| `LLM_RETRY_BACKOFF_SECONDS` | `1.0` | API 重试基础等待时间，采用指数退避并增加随机抖动。 |
+| `LLM_RETRY_BACKOFF_MAX_SECONDS` | `8.0` | API 重试等待上限；响应包含 `Retry-After` 时也受该值限制。 |
 | `LLM_FILE_TIMEOUT_SECONDS` | `600` | 单文件 main_task 总时间上限。建议至少为单次 timeout 的 2～3 倍，通常 600～900。 |
 | `LLM_CONCURRENCY` | `4` | 同时审核的文件数。不是单文件内部轮次并发。建议从 2～4 起步。 |
 | `LLM_JSON_RETRY_TIMES` | `2` | plan、重定位、过滤等 JSON 解析失败后的额外重试次数；总尝试数为 3。 |
 
 `LLM_CONCURRENCY` 调大可以缩短墙钟时间，但会增加瞬时 QPS、token 吞吐和 429 风险。建议根据模型服务限流逐步提高。
+
+模型切换规则固定为：第 1 次请求使用 `LLM_MODEL`，发生连接错误、超时、408、429、500、502、503、504 或响应结构异常时，后续 `LLM_API_RETRY_TIMES` 次请求改用 `LLM_FALLBACK_MODEL`。400、401、402、403、404、422 属于请求、鉴权、余额或参数错误，不会重试。当前两个模型都配置为 `deepseek-v4-flash`；将来启用独立兜底模型时，只需修改 `LLM_FALLBACK_MODEL` 并重启服务。
+
+单次逻辑调用最坏耗时接近 `(LLM_API_RETRY_TIMES + 1) × LLM_TIMEOUT_SECONDS + 退避等待`。开启两次重试后，应为 `LLM_FILE_TIMEOUT_SECONDS` 留出足够余量；若单次 timeout 使用 300 秒，建议单文件总 timeout 至少配置为 900～1200 秒。
+
+`LLM_API_RETRY_TIMES` 与 `LLM_JSON_RETRY_TIMES` 相互独立：前者处理网络、限流和服务端故障，后者处理 API 已成功返回但阶段 JSON 不合法的情况。一次 JSON 修复请求仍会应用自己的 API retry，因此模型服务长期不可用时，请求次数可能叠加；生产环境应同时配置合理的单次 timeout、单文件 timeout 和任务级重试上限。
 
 ## 4. main_task 循环
 
@@ -215,8 +229,12 @@ MONGO_MOCK=false
 LLM_URL=https://api.deepseek.com
 LLM_API_KEY=${SECRET_FROM_RUNTIME}
 LLM_MODEL=deepseek-v4-flash
+LLM_FALLBACK_MODEL=deepseek-v4-flash
 LLM_MOCK_ENABLED=false
 LLM_TIMEOUT_SECONDS=300
+LLM_API_RETRY_TIMES=2
+LLM_RETRY_BACKOFF_SECONDS=1.0
+LLM_RETRY_BACKOFF_MAX_SECONDS=8.0
 LLM_FILE_TIMEOUT_SECONDS=900
 LLM_CONCURRENCY=4
 LLM_MAX_TOOL_ROUNDS=30

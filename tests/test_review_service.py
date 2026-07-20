@@ -11,6 +11,7 @@ from app.models.task import TaskModel
 from app.services.diff_service import ReviewTarget
 from app.services.background import FileReviewBackground
 from app.services.review_service import ReviewTaskService
+from app.services.notification import ReviewNotificationService
 
 
 class FakeRetryLLMClient:
@@ -897,6 +898,37 @@ def test_review_task_resume_reuses_completed_file(tmp_path: Path):
     assert CodeFileModel.objects(task_id=str(task.id)).count() == 1
     code_file = CodeFileModel.objects(task_id=str(task.id)).first()
     assert code_file.extra["status"] == "resumed"
+
+
+def test_completion_email_failure_does_not_change_completed_review_to_failed(monkeypatch, tmp_path: Path):
+    target_dir = tmp_path / "head"
+    target_dir.mkdir()
+    (target_dir / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    task = TaskModel(
+        project_id="email-failure-project",
+        review_version=str(target_dir),
+        copy_from_version="0_version",
+        task_type=3,
+        state=0,
+    ).save()
+
+    def fail_email(_self, _task):
+        raise RuntimeError("mail server unavailable")
+
+    monkeypatch.setattr(ReviewNotificationService, "send_review_completed", fail_email)
+    settings = Settings(
+        mongo_mock=True,
+        llm_mock_enabled=True,
+        full_scan_project_summary_enabled=False,
+        full_scan_batch_dedup_enabled=False,
+    )
+
+    reviewed_task = ReviewTaskService(settings).review_task(task)
+
+    reviewed_task.reload()
+    assert reviewed_task.state == 2
+    assert reviewed_task.completion_status == "completed"
+    assert reviewed_task.completion_email_sent is False
 
 
 def test_finish_task_does_not_overwrite_a_newer_trigger_revision(monkeypatch):
