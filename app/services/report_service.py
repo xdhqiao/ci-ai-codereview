@@ -11,6 +11,7 @@ from app.common.utils import get_user_display_name
 from app.core.exceptions import NotFoundError
 from app.models.code_file import CodeBlock, CodeFileModel, Issue
 from app.models.code_file_snapshot import CodeFileSnapshotModel
+from app.models.issue_feedback_log import IssueFeedbackLog
 from app.models.task import TaskModel
 from app.models.task_snapshot import TaskSnapshotModel
 from app.schemas.report import (
@@ -322,6 +323,21 @@ class TaskReportService:
         issue.feedback_type = payload.feedback_type
         issue.feedback_content = payload.feedback_content
         code_file.save()
+        IssueFeedbackLog(
+            task_id=code_file.task_id,
+            project_id=code_file.project_id,
+            review_version=code_file.review_version,
+            copy_from_version=code_file.copy_from_version,
+            task_type=code_file.task_type,
+            file_name=code_file.file_name,
+            file_author=code_file.file_author or "",
+            issue_line_numbers=issue.issue_line_numbers,
+            severity=issue.severity or 0,
+            suggestion=issue.suggestion or "",
+            description=issue.description or "",
+            feedback_type=issue.feedback_type,
+            feedback_content=issue.feedback_content,
+        ).save()
         return FeedbackResponse(
             file_id=str(code_file.id),
             block_id=block_id,

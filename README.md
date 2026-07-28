@@ -49,12 +49,15 @@ pytest
 - `GET /api/admin/tasks`：后台任务列表数据接口，支持 `project_id`、`review_version`、`date_from`、`date_to`、`task_type`、`state`、`sort_by`、`sort_order`、`page`、`page_size`。
 - `GET /admin/feedback.html`、`GET /api/admin/feedback`：正式版/全量审核及维护人维度的反馈汇总，严重问题固定指 `severity=5`。
 - `GET /author/{author_name}/issue_report.html`、`GET /api/authors/{author_name}/issue-report`：维护人问题与反馈明细。
+- `GET /admin/feedback-logs.html`、`GET /api/admin/feedback-logs`：按日期查询不可变反馈日志，支持无分类、版本和负责人三种视图，默认最近 30 天且每页 20 条。
+- `GET /admin/feedback-log-detail.html`、`GET /api/admin/feedback-logs/detail`：查询指定项目、当前版本和对比版本的全部反馈日志明细。
+- `GET /admin/feedback-log-author-detail.html`、`GET /api/admin/feedback-logs/author-detail`：按负责人和日期查询反馈历史，展示负责人统计并按时间正序分页，每页默认 20 条。
 - `GET /{project_id}/{review_version}_vs_{copy_from_version}.html`：打开一个任务的增量或全量审核报告页面。
 - `GET /api/reports/tasks/{task_id}`：获取主任务最新报告；支持 `author`、`page`、`page_size`、`trigger_revision`，默认及最大每页 300 个文件。传 `trigger_revision` 时解析到对应的不可变变更快照。
 - `GET /api/reports/{project_id}/{review_version}_vs_{copy_from_version}.html`：按项目和版本组合获取主任务最新报告。
 - `GET /snapshot/{snapshot_id}/{project_id}/{review_version}_vs_{copy_from_version}.html`：打开某次后续代码变更的不可变快照报告。
 - `GET /api/reports/snapshot/{snapshot_id}/{project_id}/{review_version}_vs_{copy_from_version}.html`：获取快照报告数据，只统计该次真正变化的文件和 Block。
-- `POST /api/feedback/{file_id}/{block_id}/{issue_id}`：保存 issue 反馈。赞成传 `feedback_type=agree`；反对传 `feedback_type=reject` 和非空 `feedback_content`。
+- `POST /api/feedback/{file_id}/{block_id}/{issue_id}`：保存 issue 最新反馈，并向 `issue_feedback_log` 追加不可变历史记录。赞成传 `feedback_type=agree`；反对传 `feedback_type=reject` 和非空 `feedback_content`。
 
 ## Client 与 Server
 

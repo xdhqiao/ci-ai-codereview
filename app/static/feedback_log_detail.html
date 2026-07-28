@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>版本反馈日志明细</title>
+  <link rel="stylesheet" href="/static/feedback_logs.css?v=20260728-feedback-log3">
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div>
+        <p class="eyebrow">VERSION FEEDBACK LOG</p>
+        <h1>版本反馈日志明细</h1>
+      </div>
+      <nav class="topnav">
+        <a id="back-link" href="/admin/feedback-logs.html">反馈日志统计</a>
+        <a href="/admin/tasks.html">任务管理</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="detail-heading">
+      <div>
+        <h2 id="version-title">正在加载版本...</h2>
+        <p id="scope-label" class="muted"></p>
+      </div>
+      <div id="detail-summary" class="detail-summary"></div>
+    </section>
+
+    <section class="list-band" aria-labelledby="detail-list-title">
+      <div class="section-heading">
+        <h2 id="detail-list-title">反馈日志</h2>
+        <span id="list-range" class="muted"></span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>NO</th>
+              <th>文件名</th>
+              <th>反馈者</th>
+              <th>赞成/反对</th>
+              <th>问题等级</th>
+              <th>反馈信息</th>
+              <th>问题描述</th>
+              <th>修复建议</th>
+            </tr>
+          </thead>
+          <tbody id="detail-body"></tbody>
+        </table>
+      </div>
+      <p id="empty-state" class="empty" hidden>该版本在当前日期范围内没有反馈日志。</p>
+      <div id="error-state" class="error-state" role="alert" hidden>
+        <strong>版本反馈日志加载失败</strong>
+        <p id="error-message"></p>
+      </div>
+    </section>
+  </main>
+
+  <div id="loading" class="loading">正在加载版本反馈日志...</div>
+  <script src="/static/feedback_log_detail.js?v=20260728-feedback-log3" defer></script>
+</body>
+</html>

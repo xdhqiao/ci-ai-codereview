@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import get_settings
 from app.core.database import connect_to_mongo, disconnect_mongo
 from app.core.exceptions import register_exception_handlers
-from app.routes import admin, code_files, feedback, health, reports, tasks
+from app.routes import admin, code_files, feedback, feedback_logs, health, reports, tasks
 from app.services.data_migration import migrate_legacy_task_types
 from app.services.scheduler import ReviewScheduler
 
@@ -51,6 +51,7 @@ def create_app() -> FastAPI:
     app.include_router(code_files.router)
     app.include_router(admin.router)
     app.include_router(feedback.router)
+    app.include_router(feedback_logs.router)
     app.include_router(reports.router)
     app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "static"), name="static")
     return app

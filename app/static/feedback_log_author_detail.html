@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>负责人反馈日志明细</title>
+  <link rel="stylesheet" href="/static/feedback_logs.css?v=20260728-feedback-log4">
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div>
+        <p class="eyebrow">AUTHOR FEEDBACK LOG</p>
+        <h1 id="page-title">负责人反馈日志明细</h1>
+      </div>
+      <nav class="topnav">
+        <a id="back-link" href="/admin/feedback-logs.html">反馈日志统计</a>
+        <a href="/admin/tasks.html">任务管理</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="summary-band" aria-labelledby="summary-title">
+      <div class="section-heading">
+        <h2 id="summary-title">统计信息</h2>
+        <span id="scope-label" class="muted"></span>
+      </div>
+      <div id="summary-grid" class="summary-grid"></div>
+    </section>
+
+    <section class="list-band" aria-labelledby="detail-list-title">
+      <div class="section-heading">
+        <h2 id="detail-list-title">反馈数据列表</h2>
+        <span id="list-range" class="muted"></span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>NO</th>
+              <th>项目ID</th>
+              <th>当前版本</th>
+              <th>对比版本</th>
+              <th>文件名</th>
+              <th>赞成/反对</th>
+              <th>反馈信息</th>
+              <th>问题描述</th>
+              <th>修复建议</th>
+              <th>时间</th>
+            </tr>
+          </thead>
+          <tbody id="detail-body"></tbody>
+        </table>
+      </div>
+      <p id="empty-state" class="empty" hidden>该负责人在当前日期范围内没有反馈日志。</p>
+      <div id="error-state" class="error-state" role="alert" hidden>
+        <strong>负责人反馈日志加载失败</strong>
+        <p id="error-message"></p>
+        <button id="retry-load" class="button-secondary" type="button">重新加载</button>
+      </div>
+      <nav id="pagination" class="pagination" aria-label="负责人反馈日志分页" hidden></nav>
+    </section>
+  </main>
+
+  <div id="loading" class="loading">正在加载负责人反馈日志...</div>
+  <script src="/static/feedback_log_author_detail.js?v=20260728-feedback-log4" defer></script>
+</body>
+</html>

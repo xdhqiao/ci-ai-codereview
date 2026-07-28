@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>反馈日志统计</title>
+  <link rel="stylesheet" href="/static/feedback_logs.css?v=20260728-feedback-log4">
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div>
+        <p class="eyebrow">CODE REVIEW FEEDBACK LOG</p>
+        <h1>反馈日志统计</h1>
+      </div>
+      <nav class="topnav">
+        <a href="/admin/tasks.html">任务管理</a>
+        <a href="/admin/feedback.html">反馈管理</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="filter-band" aria-labelledby="filter-title">
+      <h2 id="filter-title">统计范围</h2>
+      <form id="filter-form">
+        <label><span>开始日期</span><input id="start-date" name="start_date" type="date" required></label>
+        <label><span>结束日期</span><input id="end-date" name="end_date" type="date" required></label>
+        <label><span>分类</span>
+          <select id="group-by" name="group_by">
+            <option value="none">无</option>
+            <option value="version">版本</option>
+            <option value="author">负责人</option>
+          </select>
+        </label>
+        <div class="filter-actions">
+          <button class="button-primary" id="apply-filter" type="button">查询</button>
+          <button class="button-secondary" id="reset-filter" type="button">最近一个月</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="summary-band" aria-labelledby="summary-title">
+      <div class="section-heading">
+        <h2 id="summary-title">数据统计</h2>
+        <span id="scope-label" class="muted"></span>
+      </div>
+      <div id="summary-grid" class="summary-grid"></div>
+    </section>
+
+    <section class="list-band" aria-labelledby="list-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="list-title">反馈日志</h2>
+          <span id="list-range" class="muted"></span>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr id="list-head"></tr></thead>
+          <tbody id="list-body"></tbody>
+        </table>
+      </div>
+      <p id="empty-state" class="empty" hidden>当前日期范围没有反馈日志。</p>
+      <div id="error-state" class="error-state" role="alert" hidden>
+        <strong>反馈日志加载失败</strong>
+        <p id="error-message"></p>
+        <button id="retry-load" class="button-secondary" type="button">重新加载</button>
+      </div>
+      <nav id="pagination" class="pagination" aria-label="反馈日志分页" hidden></nav>
+    </section>
+  </main>
+
+  <div id="loading" class="loading">正在加载反馈日志...</div>
+  <script src="/static/feedback_logs.js?v=20260728-feedback-log4" defer></script>
+</body>
+</html>
