@@ -50,3 +50,10 @@ class FeedbackType(str, Enum):
 
 def is_incremental_task_type(value: int | None) -> bool:
     return value in TaskType.incremental_values()
+
+
+TASK_TYPE_DISPLAY_NAMES = {
+    TaskType.DEV_VERSION.value: "轮询版",
+    TaskType.PRD_VERSION.value: "正式版",
+    TaskType.FULL_SCAN.value: "全量审核",
+}

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>代码审核数据看板</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260729-1">
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div>
+        <p class="eyebrow">CODE REVIEW DASHBOARD</p>
+        <h1>代码审核数据看板</h1>
+      </div>
+      <nav class="topbar-actions" aria-label="管理导航">
+        <a href="/admin/tasks.html">任务管理</a>
+        <a href="/admin/feedback.html">反馈管理</a>
+        <a href="/admin/feedback-logs.html">反馈日志</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="filter-band" aria-labelledby="period-title">
+      <div>
+        <p class="section-kicker">统计区间</p>
+        <h2 id="period-title">选择需要观察的时间窗口</h2>
+        <p class="scope-note">任务、代码与当前问题按任务创建时间统计；历史反馈按反馈提交时间统计。</p>
+      </div>
+      <form id="dashboard-filter">
+        <label>
+          <span>开始日期</span>
+          <input id="start-date" name="start_date" type="date" required>
+        </label>
+        <label>
+          <span>结束日期</span>
+          <input id="end-date" name="end_date" type="date" required>
+        </label>
+        <button class="button-primary" type="submit">查询数据</button>
+        <button id="reset-range" class="button-secondary" type="button">最近 30 天</button>
+      </form>
+    </section>
+
+    <div id="loading-state" class="status-message" role="status">正在汇总审核数据...</div>
+    <div id="error-state" class="status-message error" role="alert" hidden>
+      <strong>数据加载失败</strong>
+      <span id="error-message"></span>
+      <button id="retry-load" class="button-secondary" type="button">重新加载</button>
+    </div>
+
+    <div id="dashboard-content" hidden>
+      <section class="overview-band" aria-labelledby="overview-title">
+        <div class="overview-copy">
+          <p class="section-kicker">任务规模</p>
+          <h2 id="overview-title">审核工作全景</h2>
+          <p id="range-summary" class="range-summary"></p>
+          <div class="headline-metrics">
+            <article>
+              <span>任务总数</span>
+              <strong id="task-count">0</strong>
+            </article>
+            <article>
+              <span>项目总数</span>
+              <strong id="project-count">0</strong>
+            </article>
+          </div>
+        </div>
+        <div class="task-type-chart">
+          <div class="chart-wrap">
+            <canvas id="task-type-chart" width="240" height="240" aria-label="不同任务类型占比饼图"></canvas>
+            <div class="chart-center" aria-hidden="true">
+              <strong id="chart-total">0</strong>
+              <span>项任务</span>
+            </div>
+          </div>
+          <div>
+            <h3>任务类型分布</h3>
+            <ul id="task-type-legend" class="chart-legend"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="data-band" aria-labelledby="resource-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">资源消耗</p>
+            <h2 id="resource-title">模型与审核执行</h2>
+          </div>
+          <p>Token 与耗时来自任务累计值，调用次数来自已落库的审计轨迹。</p>
+        </div>
+        <div class="metric-grid resource-grid">
+          <article class="metric-primary">
+            <span>总 Token 数</span>
+            <strong id="total-tokens">0</strong>
+          </article>
+          <article>
+            <span>输入 Token</span>
+            <strong id="prompt-tokens">0</strong>
+          </article>
+          <article>
+            <span>输出 Token</span>
+            <strong id="completion-tokens">0</strong>
+          </article>
+          <article>
+            <span>LLM 总耗时</span>
+            <strong id="llm-elapsed">0 秒</strong>
+          </article>
+          <article>
+            <span>总文件数</span>
+            <strong id="file-count">0</strong>
+          </article>
+          <article>
+            <span>总已审文件数</span>
+            <strong id="reviewed-file-count">0</strong>
+          </article>
+          <article>
+            <span>工具调用总次数</span>
+            <strong id="tool-call-count">0</strong>
+          </article>
+          <article>
+            <span>模型总轮次</span>
+            <strong id="model-round-count">0</strong>
+          </article>
+        </div>
+      </section>
+
+      <section class="quality-band" aria-labelledby="quality-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">审核质量</p>
+            <h2 id="quality-title">问题识别结果</h2>
+          </div>
+          <p>高危问题按最高严重等级 severity = 5 统计。</p>
+        </div>
+        <div class="issue-metrics">
+          <article class="valid">
+            <span>有效问题</span>
+            <strong id="valid-issue-count">0</strong>
+            <small>通过审核过滤并进入报告</small>
+          </article>
+          <article class="filtered">
+            <span>过滤问题</span>
+            <strong id="filtered-issue-count">0</strong>
+            <small>被 REVIEW_FILTER 判定为误报</small>
+          </article>
+          <article class="severe">
+            <span>高危问题</span>
+            <strong id="severe-issue-count">0</strong>
+            <small>有效问题中 severity = 5</small>
+          </article>
+        </div>
+      </section>
+
+      <section class="feedback-band" aria-labelledby="feedback-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">人工反馈</p>
+            <h2 id="feedback-title">当前判断与历史沉淀</h2>
+          </div>
+          <p>当前反馈读取 Issue，历史反馈读取 issue_feedback_log。</p>
+        </div>
+        <div class="feedback-grid">
+          <article>
+            <div class="feedback-title">
+              <div>
+                <span>当前有效问题反馈</span>
+                <strong id="feedback-count">0</strong>
+              </div>
+              <span id="agree-rate" class="rate-pill">0%</span>
+            </div>
+            <div class="rate-track" aria-hidden="true"><span id="agree-rate-bar"></span></div>
+            <p><b id="agree-count">0</b> 条赞同，赞同比例基于当前仍保留在文件中的反馈。</p>
+          </article>
+          <article>
+            <div class="feedback-title">
+              <div>
+                <span>历史反馈日志</span>
+                <strong id="historical-feedback-count">0</strong>
+              </div>
+              <span id="historical-agree-rate" class="rate-pill history">0%</span>
+            </div>
+            <div class="rate-track history" aria-hidden="true"><span id="historical-agree-rate-bar"></span></div>
+            <p><b id="historical-agree-count">0</b> 条赞同，日志不会因代码块更新而被清除。</p>
+          </article>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/static/dashboard.js?v=20260729-1" defer></script>
+</body>
+</html>

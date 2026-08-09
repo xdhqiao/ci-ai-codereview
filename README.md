@@ -47,6 +47,7 @@ pytest
 - `GET /code-files`、`GET /code-files/{code_file_id}`：查询落库后的文件审核结果。
 - `GET /admin/tasks.html`：后台任务管理页面，支持项目/版本/日期/种类/状态筛选、全列排序和每页 20 条分页。
 - `GET /api/admin/tasks`：后台任务列表数据接口，支持 `project_id`、`review_version`、`date_from`、`date_to`、`task_type`、`state`、`sort_by`、`sort_order`、`page`、`page_size`。
+- `GET /admin/dashboard.html`、`GET /api/admin/dashboard`：代码审核数据看板，按日期统计任务与项目规模、任务类型、Token/耗时、文件与调用轨迹、有效/过滤/高危问题以及当前和历史反馈。
 - `GET /admin/feedback.html`、`GET /api/admin/feedback`：正式版/全量审核及维护人维度的反馈汇总，严重问题固定指 `severity=5`。
 - `GET /author/{author_name}/issue_report.html`、`GET /api/authors/{author_name}/issue-report`：维护人问题与反馈明细。
 - `GET /admin/feedback-logs.html`、`GET /api/admin/feedback-logs`：按日期查询不可变反馈日志，支持无分类、版本和负责人三种视图，默认最近 30 天且每页 20 条。
