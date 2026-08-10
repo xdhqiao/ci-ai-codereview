@@ -7,7 +7,7 @@
 
 ## 通用要求
 
-* 使用 Python 3.12。
+* 使用 Python 3.11。
 * Web 框架使用 FastAPI。
 * MongoDB 使用MongoEngine 同步调用。
 * 所有配置必须通过环境变量读取，不允许在代码中硬编码数据库地址、账号、密码。

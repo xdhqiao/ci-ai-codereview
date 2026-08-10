@@ -26,7 +26,7 @@ master 开发部署成功后会完成两件事：
 审核触发 Job 使用标签 `linux-python`，该 Agent 需要：
 
 - Git
-- Python 3.12
+- Python 3.11
 
 开发和生产 Job 使用标签 `linux-docker`，该 Agent 需要：
 
@@ -65,7 +65,7 @@ master 开发部署成功后会完成两件事：
 ```text
 CODE_REVIEW_SERVER_URL=http://code-review.internal:8000
 CI_IMAGE_REPOSITORY=gitlab.internal.example/ai/ci-ai-codereview
-PYTHON_BASE_IMAGE=gitlab.internal.example/base/python:3.12-slim@sha256:<digest>
+PYTHON_BASE_IMAGE=gitlab.internal.example/base/python:3.11-slim@sha256:<digest>
 
 DEV_DEPLOY_HOST=dev-code-review.internal
 DEV_DEPLOY_PORT=22
@@ -80,7 +80,7 @@ PROD_APPROVERS=release-manager,ops-team
 
 `PROD_APPROVERS` 可不配置；配置后，只有列出的 Jenkins 用户或组可以确认生产发布。
 
-`PYTHON_BASE_IMAGE` 应指向与 `CI_IMAGE_REPOSITORY` 相同公司 Registry 中同步的 Python 3.12 基础镜像，生产级配置建议使用 digest，而不是可移动 tag。未配置时回退到 `python:3.12-slim`。流水线使用临时 `DOCKER_CONFIG` 登录和清理凭据，Multibranch 并发构建不会共享 Jenkins Agent 的 Docker 登录文件。
+`PYTHON_BASE_IMAGE` 应指向与 `CI_IMAGE_REPOSITORY` 相同公司 Registry 中同步的 Python 3.11 基础镜像，生产级配置建议使用 digest，而不是可移动 tag。未配置时回退到 `python:3.11-slim`。流水线使用临时 `DOCKER_CONFIG` 登录和清理凭据，Multibranch 并发构建不会共享 Jenkins Agent 的 Docker 登录文件。
 
 ## 3. 部署服务器初始化
 
@@ -160,7 +160,7 @@ printf '%s' "$GITLAB_DEPLOY_TOKEN" | docker login gitlab.internal.example \
 
 行为如下：
 
-- feature/MR：构建镜像并在相同 Python 3.12 镜像中运行 pytest，不部署。
+- feature/MR：构建镜像并在相同 Python 3.11 镜像中运行 pytest，不部署。
 - develop/development：测试、发布完整 SHA 镜像、部署开发环境。
 - master：完成上述步骤，开发部署成功后再发布 release 镜像，并显示短 SHA。
 

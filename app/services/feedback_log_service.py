@@ -196,13 +196,16 @@ class FeedbackLogService:
                     groups[key].severe_agree_count,
                     groups[key].severe_feedback_count,
                 ),
-                detail_url=f"/admin/feedback-log-detail.html?{urlencode({
-                    'project_id': key[0],
-                    'review_version': key[1],
-                    'copy_from_version': key[2],
-                    'start_date': start_date.isoformat(),
-                    'end_date': end_date.isoformat(),
-                })}",
+                detail_url="/admin/feedback-log-detail.html?"
+                + urlencode(
+                    {
+                        "project_id": key[0],
+                        "review_version": key[1],
+                        "copy_from_version": key[2],
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                    }
+                ),
             )
             for key in ordered_keys
         ]
@@ -230,11 +233,14 @@ class FeedbackLogService:
                 author_name=self._author_name(author),
                 issue_count=groups[author].feedback_count,
                 agree_rate=self._percent(groups[author].agree_count, groups[author].feedback_count),
-                detail_url=f"/admin/feedback-log-author-detail.html?{urlencode({
-                    'file_author': author or EMPTY_FILE_AUTHOR_QUERY_VALUE,
-                    'start_date': start_date.isoformat(),
-                    'end_date': end_date.isoformat(),
-                })}",
+                detail_url="/admin/feedback-log-author-detail.html?"
+                + urlencode(
+                    {
+                        "file_author": author or EMPTY_FILE_AUTHOR_QUERY_VALUE,
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                    }
+                ),
             )
             for author in ordered_authors
         ]
