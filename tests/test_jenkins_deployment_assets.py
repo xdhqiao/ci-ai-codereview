@@ -30,9 +30,14 @@ def test_review_trigger_pipeline_preserves_client_contract():
 
 def test_development_pipeline_promotes_only_tested_master_image():
     pipeline = _read("jenkins/Jenkinsfile.develop")
+    dockerfile = _read("Dockerfile")
 
     assert "python -m pytest -q" in pipeline
     assert "docker build --pull" in pipeline
+    assert "ARG PYTHON_BASE_IMAGE=python:3.11-slim" in dockerfile
+    assert 'PYTHON_BASE_IMAGE:-python:3.11-slim' in pipeline
+    assert "python:3.12-slim" not in dockerfile
+    assert "python:3.12-slim" not in pipeline
     assert '--build-arg "PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE_VALUE"' in pipeline
     assert 'DOCKER_CONFIG="$(mktemp -d)"' in pipeline
     assert 'DOCKER_CONFIG="$WORKSPACE/' not in pipeline

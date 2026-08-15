@@ -47,7 +47,7 @@ pipeline {
                         printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY_HOST" \
                             --username "$REGISTRY_USER" --password-stdin
                         set -x
-                        PYTHON_BASE_IMAGE_VALUE="${PYTHON_BASE_IMAGE:-python:3.12-slim}"
+                        PYTHON_BASE_IMAGE_VALUE="${PYTHON_BASE_IMAGE:-python:3.11-slim}"
                         docker build --pull \
                             --build-arg "PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE_VALUE" \
                             --label "org.opencontainers.image.revision=$FULL_COMMIT" \
